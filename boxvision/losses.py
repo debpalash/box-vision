@@ -1,0 +1,357 @@
+"""
+Loss functions v2 for BoxVision.
+
+v2 changes:
+- Task-Aligned Assigner (TAL) replaces FCOS centerness-based assignment
+- Removed centerness loss
+- Cleaner GIoU computation
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Optional, Tuple
+
+
+class VarifocalLoss(nn.Module):
+    """
+    Varifocal Loss (VFL) for objectness with soft IoU targets.
+
+    Properly handles continuous targets in [0, 1] — unlike standard Focal Loss
+    which assumes binary targets.
+
+    For negatives (target == 0):
+        loss = -pred^gamma * log(1 - pred)
+    For positives (target > 0):
+        loss = -target * (target - pred)^gamma * log(pred)
+
+    Reference: VarifocalNet (Zhang et al., 2021)
+    """
+
+    def __init__(self, alpha: float = 0.75, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_sigmoid = torch.sigmoid(pred)
+        target = target.float()
+
+        # Separate positive and negative masks
+        pos_mask = target > 0
+        neg_mask = ~pos_mask
+
+        # Negative loss: weighted by pred^gamma (hard negative mining)
+        neg_loss = -(pred_sigmoid.pow(self.gamma)) * F.logsigmoid(-pred) * neg_mask.float()
+
+        # Positive loss: weighted by target * |target - pred|^gamma
+        pos_weight = target * (target - pred_sigmoid).abs().pow(self.gamma)
+        pos_loss = -pos_weight * F.logsigmoid(pred) * pos_mask.float()
+
+        loss = self.alpha * pos_loss + (1 - self.alpha) * neg_loss
+        num_pos = max(pos_mask.sum().item(), 1)
+        return loss.sum() / num_pos
+
+
+class GIoULoss(nn.Module):
+    """
+    Generalized IoU loss for bbox regression.
+
+    GIoU = IoU - |C \\\\ (A union B)| / |C|
+    Loss = 1 - GIoU
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if pred.shape[0] == 0:
+            return pred.sum() * 0.0
+
+        inter_x1 = torch.max(pred[:, 0], target[:, 0])
+        inter_y1 = torch.max(pred[:, 1], target[:, 1])
+        inter_x2 = torch.min(pred[:, 2], target[:, 2])
+        inter_y2 = torch.min(pred[:, 3], target[:, 3])
+        inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+
+        pred_area = (pred[:, 2] - pred[:, 0]) * (pred[:, 3] - pred[:, 1])
+        target_area = (target[:, 2] - target[:, 0]) * (target[:, 3] - target[:, 1])
+        union_area = pred_area + target_area - inter_area
+
+        iou = inter_area / (union_area + 1e-7)
+
+        enclose_x1 = torch.min(pred[:, 0], target[:, 0])
+        enclose_y1 = torch.min(pred[:, 1], target[:, 1])
+        enclose_x2 = torch.max(pred[:, 2], target[:, 2])
+        enclose_y2 = torch.max(pred[:, 3], target[:, 3])
+        enclose_area = (enclose_x2 - enclose_x1) * (enclose_y2 - enclose_y1)
+
+        giou = iou - (enclose_area - union_area) / (enclose_area + 1e-7)
+        return (1 - giou).mean()
+
+
+def _compute_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """
+    Compute pairwise IoU between two sets of boxes.
+
+    Args:
+        boxes1: [N, 4] in (x1, y1, x2, y2)
+        boxes2: [M, 4] in (x1, y1, x2, y2)
+
+    Returns:
+        iou: [N, M]
+    """
+    N, M = boxes1.shape[0], boxes2.shape[0]
+    a = boxes1[:, None, :].expand(N, M, 4)
+    b = boxes2[None, :, :].expand(N, M, 4)
+
+    inter_x1 = torch.max(a[..., 0], b[..., 0])
+    inter_y1 = torch.max(a[..., 1], b[..., 1])
+    inter_x2 = torch.min(a[..., 2], b[..., 2])
+    inter_y2 = torch.min(a[..., 3], b[..., 3])
+    inter = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+
+    area_a = (a[..., 2] - a[..., 0]) * (a[..., 3] - a[..., 1])
+    area_b = (b[..., 2] - b[..., 0]) * (b[..., 3] - b[..., 1])
+
+    return inter / (area_a + area_b - inter + 1e-7)
+
+
+class TaskAlignedAssigner:
+    """
+    Task-Aligned Assigner (TAL) with optional soft labels (DSLA-style).
+
+    Standard TAL: picks best anchor-point per GT using alignment metric.
+    Soft labels: positive targets are IoU values instead of hard 1.0.
+    This gives the model a richer training signal — the key insight from
+    NanoDet-Plus that provided +7 mAP improvement.
+
+    alignment_metric = objectness^alpha * iou^beta
+    """
+
+    def __init__(self, topk: int = 10, alpha: float = 0.5, beta: float = 6.0,
+                 use_soft_labels: bool = True):
+        self.topk = topk
+        self.alpha = alpha
+        self.beta = beta
+        self.use_soft_labels = use_soft_labels
+
+    @torch.no_grad()
+    def assign(
+        self,
+        obj_scores: torch.Tensor,    # [num_points] objectness scores (sigmoid)
+        pred_boxes: torch.Tensor,     # [num_points, 4] predicted boxes (xyxy)
+        gt_boxes: torch.Tensor,       # [num_gt, 4] ground truth boxes (xyxy)
+        points: torch.Tensor,         # [num_points, 2] grid center points (x, y)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Assign GT boxes to prediction points using task-aligned metric.
+
+        Returns:
+            labels: [num_points] soft/hard labels (IoU or 1.0 for positives)
+            bbox_targets: [num_points, 4] target boxes for positives (xyxy)
+            assign_metrics: [num_points] alignment metric for positive weighting
+        """
+        num_points = points.shape[0]
+        num_gt = gt_boxes.shape[0]
+        device = points.device
+
+        if num_gt == 0:
+            return (
+                torch.zeros(num_points, device=device),
+                torch.zeros(num_points, 4, device=device),
+                torch.zeros(num_points, device=device),
+            )
+
+        # 1. Filter: only consider points inside GT boxes
+        px = points[:, 0:1]  # [N, 1]
+        py = points[:, 1:2]  # [N, 1]
+        gt_x1 = gt_boxes[:, 0:1].T  # [1, M]
+        gt_y1 = gt_boxes[:, 1:2].T
+        gt_x2 = gt_boxes[:, 2:3].T
+        gt_y2 = gt_boxes[:, 3:4].T
+
+        inside_mask = (px >= gt_x1) & (px <= gt_x2) & (py >= gt_y1) & (py <= gt_y2)  # [N, M]
+
+        # 2. Compute alignment metric
+        iou = _compute_iou(pred_boxes, gt_boxes)  # [N, M]
+        obj_expanded = obj_scores[:, None].expand(-1, num_gt)  # [N, M]
+        alignment = obj_expanded.pow(self.alpha) * iou.pow(self.beta)
+        alignment = alignment * inside_mask.float()
+
+        # 3. Select top-k per GT box
+        topk_mask = torch.zeros_like(alignment, dtype=torch.bool)  # [N, M]
+        topk_k = min(self.topk, num_points)
+
+        for gt_idx in range(num_gt):
+            gt_alignment = alignment[:, gt_idx]
+            if gt_alignment.sum() == 0:
+                continue
+            _, topk_indices = gt_alignment.topk(topk_k, dim=0)
+            topk_mask[topk_indices, gt_idx] = True
+
+        candidate_mask = topk_mask & inside_mask  # [N, M]
+
+        # 4. Resolve conflicts: each point assigned to at most 1 GT (highest IoU)
+        candidate_iou = iou * candidate_mask.float()
+        max_iou, assigned_gt = candidate_iou.max(dim=1)  # [N]
+        is_positive = max_iou > 0
+
+        # 5. Labels: soft (IoU-based) or hard (binary)
+        if self.use_soft_labels:
+            # DSLA-style: positive targets = IoU with assigned GT
+            # This gives the model richer supervision — a point with IoU 0.9
+            # should have higher objectness than one with IoU 0.3
+            labels = max_iou  # Soft: [0, 1] range based on IoU
+        else:
+            labels = is_positive.float()  # Hard: 0 or 1
+
+        # Gather targets
+        bbox_targets = gt_boxes[assigned_gt]  # [N, 4]
+        bbox_targets = bbox_targets * is_positive[:, None].float()  # Zero out negatives
+
+        # Alignment metric for loss weighting
+        assign_metrics = alignment[torch.arange(num_points, device=device), assigned_gt]
+        assign_metrics = assign_metrics * is_positive.float()
+
+        return labels, bbox_targets, assign_metrics
+
+
+class BoxVisionLoss(nn.Module):
+    """
+    Combined loss for BoxVision v2.
+
+    Uses TAL assigner for positive sample selection.
+    No centerness loss — cleaner training signal.
+    """
+
+    def __init__(
+        self,
+        focal_alpha: float = 0.75,
+        focal_gamma: float = 2.0,
+        objectness_weight: float = 1.0,
+        bbox_weight: float = 2.0,
+        strides: List[int] = None,
+        tal_topk: int = 10,
+        tal_alpha: float = 0.5,
+        tal_beta: float = 6.0,
+        use_soft_labels: bool = True,
+    ):
+        super().__init__()
+        self.obj_loss_fn = VarifocalLoss(focal_alpha, focal_gamma)
+        self.giou_loss = GIoULoss()
+        self.objectness_weight = objectness_weight
+        self.bbox_weight = bbox_weight
+        self.strides = strides or [8, 16, 32]
+
+        self.assigner = TaskAlignedAssigner(
+            topk=tal_topk, alpha=tal_alpha, beta=tal_beta,
+            use_soft_labels=use_soft_labels,
+        )
+
+    def _get_points(self, featmap_size: Tuple[int, int], stride: int,
+                    device: torch.device) -> torch.Tensor:
+        """Generate grid center points for one FPN level."""
+        h, w = featmap_size
+        x_range = torch.arange(0, w, device=device).float() * stride + stride // 2
+        y_range = torch.arange(0, h, device=device).float() * stride + stride // 2
+        y, x = torch.meshgrid(y_range, x_range, indexing="ij")
+        return torch.stack([x.reshape(-1), y.reshape(-1)], dim=-1)
+
+    def _ltrb_to_xyxy(self, points: torch.Tensor, ltrb: torch.Tensor) -> torch.Tensor:
+        """Convert (l, t, r, b) distances from points to (x1, y1, x2, y2)."""
+        x1 = points[:, 0] - ltrb[:, 0]
+        y1 = points[:, 1] - ltrb[:, 1]
+        x2 = points[:, 0] + ltrb[:, 2]
+        y2 = points[:, 1] + ltrb[:, 3]
+        return torch.stack([x1, y1, x2, y2], dim=-1)
+
+    def forward(
+        self,
+        objectness_preds: List[torch.Tensor],
+        bbox_preds: List[torch.Tensor],
+        centerness_preds: Optional[List[torch.Tensor]],
+        gt_boxes_batch: List[torch.Tensor],
+    ) -> dict:
+        """
+        Compute losses using TAL assignment.
+
+        Args:
+            objectness_preds: List of [B, 1, Hi, Wi] per level
+            bbox_preds: List of [B, 4, Hi, Wi] per level
+            centerness_preds: Ignored in v2 (kept for API compat)
+            gt_boxes_batch: List of [Mi, 4] GT boxes per image (x1,y1,x2,y2)
+        """
+        device = objectness_preds[0].device
+        batch_size = objectness_preds[0].shape[0]
+        num_levels = len(objectness_preds)
+
+        total_obj_loss = torch.tensor(0.0, device=device)
+        total_bbox_loss = torch.tensor(0.0, device=device)
+        total_positives = 0
+
+        for b in range(batch_size):
+            # Gather all predictions across levels for this image
+            all_obj = []
+            all_bbox = []
+            all_points = []
+
+            for level_idx in range(num_levels):
+                stride = self.strides[level_idx]
+                obj = objectness_preds[level_idx][b, 0]   # [H, W]
+                bbox = bbox_preds[level_idx][b]            # [4, H, W]
+                H, W = obj.shape
+
+                points = self._get_points((H, W), stride, device)
+                obj_flat = obj.reshape(-1)
+                bbox_flat = bbox.permute(1, 2, 0).reshape(-1, 4)
+
+                all_obj.append(obj_flat)
+                all_bbox.append((bbox_flat, points, stride))
+                all_points.append(points)
+
+            # Concatenate across levels
+            cat_obj = torch.cat([o for o in all_obj], dim=0)
+            cat_points = torch.cat(all_points, dim=0)
+
+            # Decode bbox predictions to xyxy
+            cat_bbox_decoded = []
+            for bbox_flat, points, stride in all_bbox:
+                decoded = self._ltrb_to_xyxy(points, bbox_flat)
+                cat_bbox_decoded.append(decoded)
+            cat_bbox_decoded = torch.cat(cat_bbox_decoded, dim=0)
+
+            # TAL assignment
+            gt_boxes = gt_boxes_batch[b].to(device)
+            obj_scores = torch.sigmoid(cat_obj)
+
+            labels, bbox_targets, assign_metrics = self.assigner.assign(
+                obj_scores, cat_bbox_decoded, gt_boxes, cat_points
+            )
+
+            # Objectness loss (all points)
+            total_obj_loss = total_obj_loss + self.obj_loss_fn(cat_obj, labels)
+
+            # BBox loss (positive points only)
+            pos_mask = labels > 0
+            num_pos = pos_mask.sum().item()
+            total_positives += num_pos
+
+            if num_pos > 0:
+                pos_pred = cat_bbox_decoded[pos_mask]
+                pos_target = bbox_targets[pos_mask]
+                total_bbox_loss = total_bbox_loss + self.giou_loss(pos_pred, pos_target)
+
+        # Normalize
+        total_obj_loss = total_obj_loss / batch_size
+        total_bbox_loss = total_bbox_loss / max(batch_size, 1)
+
+        total_loss = (
+            self.objectness_weight * total_obj_loss +
+            self.bbox_weight * total_bbox_loss
+        )
+
+        return {
+            "total_loss": total_loss,
+            "objectness_loss": total_obj_loss.detach(),
+            "bbox_loss": total_bbox_loss.detach(),
+            "centerness_loss": torch.tensor(0.0),  # v2: removed, kept for compat
+            "num_positives": total_positives,
+        }
