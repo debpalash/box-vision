@@ -22,6 +22,7 @@ from .losses import BoxVisionLoss
 from .dataset import build_dataloader
 from .config import ModelConfig, TrainConfig
 from .evaluate import evaluate_model
+from .registry import load_dataset, verify_dataset
 
 
 class CosineWarmupScheduler:
@@ -65,8 +66,15 @@ class Trainer:
         # EMA
         self.ema = None
         if self.train_config.use_ema:
-            self.ema = ModelEMA(self.model, decay=self.train_config.ema_decay)
-            print(f"EMA enabled (decay={self.train_config.ema_decay})")
+            self.ema = ModelEMA(
+                self.model,
+                decay=self.train_config.ema_decay,
+                warmup_steps=self.train_config.ema_warmup_steps,
+            )
+            print(
+                f"EMA enabled (decay={self.train_config.ema_decay}, "
+                f"warmup_steps={self.train_config.ema_warmup_steps})"
+            )
 
         # Loss
         self.criterion = BoxVisionLoss(
@@ -104,12 +112,31 @@ class Trainer:
         self.start_epoch = 0
 
     def build_dataloaders(self):
-        """Build training and validation dataloaders."""
-        data_dir = self.train_config.data_dir
+        """
+        Build training and validation dataloaders from the dataset registry.
+
+        Reads the dataset spec from datasets.yaml via boxvision.registry.
+        The dataset name is taken from TrainConfig.dataset.
+        """
+        spec = load_dataset(self.train_config.dataset)
+        errors = verify_dataset(spec)
+        if errors:
+            raise FileNotFoundError(
+                f"Dataset '{spec.name}' has missing paths:\n  - " + "\n  - ".join(errors)
+            )
+
+        if spec.format != "coco":
+            raise NotImplementedError(
+                f"Dataset '{spec.name}' uses format '{spec.format}'. "
+                f"Only 'coco' is supported in build_dataloader currently. "
+                f"YOLO loader is planned (see BLUEPRINT.md M0)."
+            )
+
+        print(f"Dataset: {spec.name} ({spec.format}) — {spec.description}")
 
         self.train_loader = build_dataloader(
-            image_dir=os.path.join(data_dir, "images", "train"),
-            annotation_file=os.path.join(data_dir, "annotations", self.train_config.train_ann),
+            image_dir=spec.train.images,
+            annotation_file=spec.train.annotations,
             input_size=self.model_config.input_size,
             batch_size=self.train_config.batch_size,
             num_workers=self.train_config.num_workers,
@@ -118,8 +145,8 @@ class Trainer:
         )
 
         self.val_loader = build_dataloader(
-            image_dir=os.path.join(data_dir, "images", "val"),
-            annotation_file=os.path.join(data_dir, "annotations", self.train_config.val_ann),
+            image_dir=spec.val.images,
+            annotation_file=spec.val.annotations,
             input_size=self.model_config.input_size,
             batch_size=self.train_config.batch_size,
             num_workers=self.train_config.num_workers,
@@ -187,14 +214,31 @@ class Trainer:
         }
 
     def validate(self) -> dict:
-        """Validate using EMA model if available, else raw model."""
-        eval_model = self.ema.ema_model if self.ema else self.model
-        return evaluate_model(
-            eval_model,
-            self.val_loader,
-            device=self.device,
-            iou_threshold=0.5,
+        """Validate both raw and (if enabled) EMA models.
+
+        For short training runs on small datasets, EMA often lags badly because
+        the running average is still mostly initialization weights. We log both
+        and use the raw model's mAP for "best" selection — EMA can only be
+        trusted once `ema.updates` is well into the hundreds.
+        """
+        raw_metrics = evaluate_model(
+            self.model, self.val_loader, device=self.device, iou_threshold=0.5,
         )
+        out = {f"raw_{k}": v for k, v in raw_metrics.items()}
+
+        if self.ema is not None:
+            ema_metrics = evaluate_model(
+                self.ema.ema_model, self.val_loader, device=self.device, iou_threshold=0.5,
+            )
+            out.update({f"ema_{k}": v for k, v in ema_metrics.items()})
+
+        # Primary "mAP50" used by best-checkpoint selection: max(raw, EMA).
+        # During warmup EMA is at 0; later it usually beats raw.
+        primary_mAP = raw_metrics.get("mAP50", 0.0)
+        if self.ema is not None:
+            primary_mAP = max(primary_mAP, out.get("ema_mAP50", 0.0))
+        out["mAP50"] = primary_mAP
+        return out
 
     def save_checkpoint(self, epoch: int, metrics: dict, is_best: bool = False):
         save_dir = self.train_config.save_dir
@@ -256,14 +300,18 @@ class Trainer:
         print(f"Mosaic:       {'ON' if self.train_config.mosaic else 'OFF'}")
         print(f"{'='*60}\n")
 
+        # Cap the mosaic-off window so short training runs still get augmentation.
+        # If mosaic_off_epochs >= total epochs, mosaic would never be on.
+        effective_off = min(self.train_config.mosaic_off_epochs, self.train_config.epochs // 2)
+
         for epoch in range(self.start_epoch, self.train_config.epochs):
             # Mosaic scheduling: disable for last N epochs
             if self.train_config.mosaic:
                 remaining = self.train_config.epochs - epoch
-                mosaic_on = remaining > self.train_config.mosaic_off_epochs
+                mosaic_on = remaining > effective_off
                 self.train_loader.dataset.set_mosaic(mosaic_on)
-                if not mosaic_on and remaining == self.train_config.mosaic_off_epochs:
-                    print(f"  Mosaic OFF for final {self.train_config.mosaic_off_epochs} epochs")
+                if not mosaic_on and remaining == effective_off:
+                    print(f"  Mosaic OFF for final {effective_off} epochs")
 
             train_metrics = self.train_one_epoch(epoch)
 
@@ -278,9 +326,15 @@ class Trainer:
             if (epoch + 1) % self.train_config.eval_interval == 0:
                 print(f"\n  Validation:")
                 val_metrics = self.validate()
-                print(f"  mAP@0.5: {val_metrics.get('mAP50', 0):.4f}")
-                print(f"  Precision: {val_metrics.get('precision', 0):.4f}")
-                print(f"  Recall: {val_metrics.get('recall', 0):.4f}")
+                print(f"  raw mAP@0.5: {val_metrics.get('raw_mAP50', 0):.4f}  "
+                      f"(P={val_metrics.get('raw_precision', 0):.4f} "
+                      f"R={val_metrics.get('raw_recall', 0):.4f})")
+                if "ema_mAP50" in val_metrics:
+                    ema_updates = self.ema.updates if self.ema else 0
+                    print(f"  ema mAP@0.5: {val_metrics.get('ema_mAP50', 0):.4f}  "
+                          f"(P={val_metrics.get('ema_precision', 0):.4f} "
+                          f"R={val_metrics.get('ema_recall', 0):.4f}, "
+                          f"updates={ema_updates})")
 
             is_best = val_metrics.get("mAP50", 0) > self.best_metric
             if is_best:

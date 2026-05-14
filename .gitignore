@@ -1,0 +1,49 @@
+# Datasets (large, not checked in)
+datasets/
+data/
+
+# Training artifacts
+runs/
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv
+.uv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Logs
+*.log
+wandb/
+mlruns/
+tensorboard_logs/

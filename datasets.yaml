@@ -1,0 +1,74 @@
+# BoxVision dataset registry
+#
+# Each entry describes one dataset. The CLI / training code resolves names to
+# concrete paths via boxvision.registry.load_dataset(name).
+#
+# Schema:
+#   <name>:
+#     format: coco | yolo                   # which loader to use
+#     root:   path                          # relative to project root (or absolute)
+#     class_agnostic: true | false          # collapse all classes to one "object"
+#     description: free text                # for `boxvision datasets` listing
+#     license: free text                    # for attribution / weights provenance
+#     splits:
+#       train:
+#         images: path (relative to root)
+#         annotations: path (relative to root)  # COCO format
+#         labels: path (relative to root)       # YOLO format (mutually exclusive)
+#       val:   { ... }
+#       test:  { ... }                      # optional
+
+road-signs:
+  format: coco
+  root: datasets/coco
+  class_agnostic: true
+  description: Roboflow road-signs v2 — 21 traffic-sign classes, collapsed for class-agnostic training
+  license: CC BY 4.0
+  source: https://universe.roboflow.com/roboflow-100/road-signs-6ih4y
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+    test:
+      images: test
+      annotations: test/_annotations.coco.json
+
+road-signs-yolo:
+  format: yolo
+  root: datasets/yolo26
+  class_agnostic: true
+  description: Same road-signs data in YOLO TXT format (Ultralytics ecosystem)
+  license: CC BY 4.0
+  source: https://universe.roboflow.com/roboflow-100/road-signs-6ih4y
+  splits:
+    train:
+      images: train/images
+      labels: train/labels
+    val:
+      images: valid/images
+      labels: valid/labels
+    test:
+      images: test/images
+      labels: test/labels
+
+# Future entries — add as datasets are prepared:
+#
+# coco-collapsed:
+#   format: coco
+#   root: datasets/coco-2017
+#   class_agnostic: true
+#   description: COCO 2017 with 80 categories collapsed to one — apples-to-apples vs YOLO26n
+#   splits:
+#     train: { images: train2017, annotations: annotations/instances_train2017.json }
+#     val:   { images: val2017,   annotations: annotations/instances_val2017.json }
+#
+# sa-1b-pretrain:
+#   format: coco
+#   root: datasets/sa-1b-subset
+#   class_agnostic: true
+#   description: SA-1B subset auto-converted via mask→bbox for PrototypeDet pretraining
+#   splits:
+#     train: { images: images, annotations: bboxes_train.json }

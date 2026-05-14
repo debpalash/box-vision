@@ -188,21 +188,38 @@ class ModelEMA:
     Standard technique used in YOLO, EfficientDet, etc.
     """
 
-    def __init__(self, model: nn.Module, decay: float = 0.9999):
+    def __init__(self, model: nn.Module, decay: float = 0.99, warmup_steps: int = 50):
         self.decay = decay
+        self.warmup_steps = warmup_steps
         self.ema_model = BoxVision(model.config)
         self.ema_model.load_state_dict(model.state_dict())
         self.ema_model.eval()
         for p in self.ema_model.parameters():
             p.requires_grad_(False)
         self.updates = 0
+        self.skipped = 0
 
     def update(self, model: nn.Module):
-        """Update EMA weights after each training step."""
+        """Update EMA weights after each training step.
+
+        Skips updates for the first `warmup_steps` training steps so the raw
+        model has time to move off its initialization. After warmup, decay
+        ramps from low to target via `min(decay, (1 + n) / (10 + n))` —
+        standard YOLO-style warmup that prevents the early-step bias.
+        """
+        if self.skipped < self.warmup_steps:
+            self.skipped += 1
+            # Keep EMA snapped to the current model during warmup so we don't
+            # carry stale init weights into the post-warmup average.
+            with torch.no_grad():
+                for ema_p, model_p in zip(self.ema_model.parameters(), model.parameters()):
+                    ema_p.copy_(model_p)
+                for ema_b, model_b in zip(self.ema_model.buffers(), model.buffers()):
+                    ema_b.copy_(model_b)
+            return
+
         self.updates += 1
-        # Ramp up decay from 0 to target over first ~2000 steps
-        # Warmup: decay ramps from 0 → target over early steps
-        d = min(self.decay, 1 - 1 / (self.updates + 1))
+        d = min(self.decay, (1 + self.updates) / (10 + self.updates))
 
         with torch.no_grad():
             for ema_p, model_p in zip(self.ema_model.parameters(), model.parameters()):

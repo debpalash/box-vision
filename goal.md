@@ -5,7 +5,7 @@
 A class-agnostic bounding box detector optimized for CPU inference.
 Target: **multiple-fold CPU speedup vs YOLO26n** at deployable accuracy on single-class (objectness) detection.
 
-**Differentiating bet**: train on **SAM-auto-labeled images at scale** — a class-agnostic supervision signal that multi-class models (YOLO/RT-DETR) structurally can't use. See [Innovation Plan](#innovation-plan---sam-pretrain).
+**Differentiating bet**: **PrototypeDet** — replace the classifier objectness head with metric-learning prototypes bootstrapped from SAM masks. A class-agnostic supervision signal multi-class models structurally can't use. See [Research Direction](#research-direction--prototypedet-the-ambitious-bet).
 
 Reference points:
 
@@ -50,9 +50,100 @@ ONNX export latency unverified — expected ~50-70% of PyTorch eager.
 
 ---
 
-## Innovation Plan - SAM Pretrain
+## Research Direction — PrototypeDet (the ambitious bet)
 
-The headline innovation. Three changes that compound; one is the differentiating bet, the other two are quality multipliers.
+The core architectural innovation. Replaces the standard "objectness classifier head" with **prototype-based metric learning**, bootstrapped from SAM masks. Plausibly paper-worthy if it works.
+
+### The core idea
+
+Every tiny detector (NanoDet, PicoDet, YOLO-nano, our v2) uses a per-spatial-location classifier head for objectness — a CNN that outputs a logit per grid cell. We replace it with:
+
+```python
+projected_feat = 1x1Conv(F)              # B, D, H, W   — project features to embedding space
+prototypes     = learned_param           # K, D         — K learned "object" prototypes
+similarity     = cosine_sim(projected_feat, prototypes)  # B, K, H, W
+objectness     = temperature * max_k(similarity)         # B, 1, H, W
+```
+
+The model no longer asks "is this cell a positive sample?" via a learned classifier. It asks **"does this cell's feature embedding look like one of K learned object prototypes?"** via metric learning.
+
+### Why this is research-grade (not just engineering)
+
+1. **Novel architecture for tiny detection.** Metric-learning heads exist in classification (CLIP, ProtoNet) and segmentation (Mask2Former queries). No published tiny detector uses prototype-based objectness. DETR uses ~100 object queries via a decoder; we use K=4 prototypes with cosine similarity at every spatial location — different mechanism entirely.
+
+2. **Class-agnostic is the natural fit.** "What is an object?" reduces to "what's in the learned prototype set?" Multi-class detectors structurally cannot use this framing because they need per-class classifiers.
+
+3. **Bootstraps perfectly from SAM.** SAM masks provide positive/negative patch pairs for free. Pretrain prototypes via InfoNCE on SAM mask embeddings vs background. Self-supervised on millions of images.
+
+4. **Different generalization story.** A classifier head memorizes COCO statistics. Learned prototypes are forced to extract a *visual essence of objectness* that hypothetically transfers across domains (road signs, medical, aerial) more cleanly. Falsifiable hypothesis we can test.
+
+5. **Falsifiable = publishable either way.** Either prototype-based heads match classifier heads at tiny scales, or they don't. Either they transfer better cross-domain, or they don't. Both outcomes are publishable.
+
+### Architecture diff vs v2
+
+| Component | v2 | PrototypeDet |
+| --- | --- | --- |
+| Backbone | ShuffleNetV2-0.5x (143K) | unchanged |
+| Neck | top-down FPN 32ch (15K) | unchanged |
+| **Objectness head** | 1 conv tower + 1 pred conv = **4K params, classifier-style** | **1×1 projection (32→128) + K=4 prototypes (4×128) = 4.6K params, prototype-style** |
+| bbox head | 1 conv tower + 1 pred conv = ~3K | unchanged |
+| Loss | Focal on objectness | **InfoNCE pretrain → BCE on similarity logits** |
+| Pretraining | ImageNet (backbone only) | **SAM mask embeddings → InfoNCE contrastive on prototypes** |
+
+Param count: roughly identical. Latency: identical (cosine sim ≈ dot product). The change is in *what the head learns*.
+
+### Two-stage training recipe
+
+**Stage 1 — Prototype pretraining via SAM (the novel part)**:
+
+1. Run SAM-2/FastSAM on ~200K images → mask-per-object.
+2. Sample positive embeddings: feature vectors at the **interior** of each mask (avoiding edges).
+3. Sample negative embeddings: feature vectors at background pixels (>50px from any mask).
+4. Train projection + prototypes via **InfoNCE loss**: positives close to *some* prototype, negatives far from *all* prototypes.
+5. Freeze backbone during this stage. ~20 epochs, no bbox supervision yet.
+
+**Stage 2 — Joint detection finetuning**:
+
+1. Unfreeze backbone. Add bbox head.
+2. Objectness loss: BCE on temperature-scaled prototype similarity (no Focal needed — similarity is naturally calibrated).
+3. bbox loss: standard GIoU.
+4. Mosaic + TAL soft labels + EMA. Standard recipe.
+
+### Risk register (honest)
+
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| K=1 prototype too rigid for object diversity | High | Start K=4-8, ablate. Per-FPN-level prototypes if needed. |
+| Prototypes collapse to backbone average | High | Orthogonality + diversity regularizers. Standard. |
+| Cosine sim quantizes poorly to INT8 | Medium | Replace with `dot(x,p)/sqrt(D)` + learned scale — INT8-friendly. |
+| Spatial locality lost (every position uses same global prototypes) | Medium | Per-FPN-level prototype sets (3 sets × 4 prototypes = 12 total params). |
+| InfoNCE training unstable at tiny scale | Medium | SimCLR-style temperature + warmup, gradient clip. |
+| Cross-domain transfer hypothesis fails empirically | **The bet** | This *is* the experiment. Null result still tells us something. |
+
+### Honest framing of the publishability bar
+
+**Plausibly paper-worthy** if it:
+
+- Matches classifier-head baseline at equal params on COCO class-agnostic mAP (proves viability)
+- AND transfers better cross-domain (e.g., +3+ mAP on road-signs after same finetune budget) (proves the inductive-bias claim)
+- AND we ablate K, prototype regularizers, and pretrain data scale (so we know what matters)
+
+**If only viability holds** → cool engineering, not a paper. Use it anyway.
+
+**If nothing holds** → we publish the negative result (genuinely useful for the field), revert to classifier head, and still have the SAM-pretrain pipeline as a strong baseline.
+
+### Connection to broader ML research themes
+
+- **Metric learning revival** (prototypical networks, few-shot learning)
+- **Self-supervised representation learning** for downstream detection (DINO, MAE)
+- **Energy-based models** — if you squint, learned prototypes define an implicit energy landscape over feature space
+- **In-context detection** — natural extension: swap prototypes at inference with user-provided exemplars → "detect things that look like this" without retraining. This is the long-term vision unlock.
+
+---
+
+## Pragmatic Innovations (the floor below PrototypeDet)
+
+If PrototypeDet doesn't work, these still ship a competitive detector. They also stack with PrototypeDet if it does work.
 
 ### Why class-agnostic gives us leverage no published model uses
 

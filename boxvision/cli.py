@@ -3,7 +3,8 @@
 BoxVision CLI — Train, evaluate, export, and run inference.
 
 Usage:
-    python -m boxvision.cli train --data ./data --epochs 100 --batch-size 16
+    python -m boxvision.cli datasets
+    python -m boxvision.cli train --dataset road-signs --epochs 100
     python -m boxvision.cli export --checkpoint ./runs/best.pt --output ./model.onnx
     python -m boxvision.cli detect --model ./model.onnx --image ./test.jpg
     python -m boxvision.cli benchmark --model ./model.onnx --image ./test.jpg
@@ -12,7 +13,6 @@ Usage:
 
 import argparse
 import sys
-import os
 
 
 def cmd_train(args):
@@ -20,7 +20,6 @@ def cmd_train(args):
     from .config import ModelConfig, TrainConfig, tiny_config, small_config
     from .train import Trainer
 
-    # Resolve preset
     if args.preset == "tiny":
         model_config = tiny_config(
             input_size=(args.input_size, args.input_size),
@@ -38,9 +37,7 @@ def cmd_train(args):
         )
 
     train_config = TrainConfig(
-        data_dir=args.data,
-        train_ann=args.train_ann,
-        val_ann=args.val_ann,
+        dataset=args.dataset,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -53,6 +50,27 @@ def cmd_train(args):
 
     trainer = Trainer(model_config, train_config)
     trainer.train(resume_from=args.resume)
+
+
+def cmd_datasets(args):
+    """List datasets registered in datasets.yaml."""
+    from .registry import list_datasets, load_dataset, verify_dataset
+
+    entries = list_datasets()
+    if not entries:
+        print("No datasets registered. Add entries to datasets.yaml.")
+        return
+
+    print(f"{'NAME':22s} {'FORMAT':8s} {'STATUS':12s} DESCRIPTION")
+    print("-" * 80)
+    for entry in entries:
+        try:
+            spec = load_dataset(entry["name"])
+            errors = verify_dataset(spec)
+            status = "ready" if not errors else f"{len(errors)} missing"
+        except Exception as exc:
+            status = f"error: {exc.__class__.__name__}"
+        print(f"{entry['name']:22s} {entry['format']:8s} {status:12s} {entry['description']}")
 
 
 def cmd_export(args):
@@ -158,18 +176,20 @@ def cmd_info(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BoxVision — Lightweight CPU Box Detector",
+        description="boxvision — Lightweight CPU Box Detector",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # --- Datasets ---
+    subparsers.add_parser("datasets", help="List datasets registered in datasets.yaml")
+
     # --- Train ---
     train_parser = subparsers.add_parser("train", help="Train the model")
     train_parser.add_argument("--preset", type=str, default="small", choices=["tiny", "small"],
-                              help="Model preset: tiny (~162K params) or small (~500K params)")
-    train_parser.add_argument("--data", type=str, required=True, help="Path to data directory")
-    train_parser.add_argument("--train-ann", type=str, default="train.json", help="Training annotation file")
-    train_parser.add_argument("--val-ann", type=str, default="val.json", help="Validation annotation file")
+                              help="Model preset: tiny (~162K params) or small (~838K params)")
+    train_parser.add_argument("--dataset", type=str, default="road-signs",
+                              help="Dataset name from datasets.yaml (run `boxvision datasets` to list)")
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
@@ -216,6 +236,7 @@ def main():
 
     commands = {
         "train": cmd_train,
+        "datasets": cmd_datasets,
         "export": cmd_export,
         "detect": cmd_detect,
         "benchmark": cmd_benchmark,

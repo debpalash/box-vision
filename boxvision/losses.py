@@ -42,7 +42,9 @@ class VarifocalLoss(nn.Module):
         neg_mask = ~pos_mask
 
         # Negative loss: weighted by pred^gamma (hard negative mining)
-        neg_loss = -(pred_sigmoid.pow(self.gamma)) * F.logsigmoid(-pred) * neg_mask.float()
+        # Floor at 0.01 to prevent gradient death when pred ≈ 0.01 at init
+        neg_weight = torch.clamp(pred_sigmoid.pow(self.gamma), min=0.01)
+        neg_loss = -neg_weight * F.logsigmoid(-pred) * neg_mask.float()
 
         # Positive loss: weighted by target * |target - pred|^gamma
         pos_weight = target * (target - pred_sigmoid).abs().pow(self.gamma)

@@ -27,7 +27,7 @@ class ModelConfig:
     head_use_depthwise: bool = True
 
     # --- Objectness ---
-    objectness_threshold: float = 0.35
+    objectness_threshold: float = 0.05
     nms_threshold: float = 0.50
     max_detections: int = 100
 
@@ -72,10 +72,9 @@ class TrainConfig:
     """Training configuration."""
 
     # --- Dataset ---
-    data_dir: str = "./data"
-    annotation_format: str = "coco"
-    train_ann: str = "train.json"
-    val_ann: str = "val.json"
+    # Dataset is referenced by registry name (see datasets.yaml).
+    # Paths and format are resolved via boxvision.registry.load_dataset().
+    dataset: str = "road-signs"
 
     # --- Training ---
     epochs: int = 100
@@ -91,7 +90,7 @@ class TrainConfig:
     warmup_lr_ratio: float = 0.001
 
     # --- Loss weights ---
-    loss_objectness_weight: float = 1.0
+    loss_objectness_weight: float = 4.0
     loss_bbox_weight: float = 2.0
 
     # --- Focal loss params ---
@@ -110,8 +109,12 @@ class TrainConfig:
     mosaic_off_epochs: int = 10
 
     # --- EMA ---
+    # Tuned for small datasets (1-2K images): 0.999 takes ~5K steps to converge,
+    # which means EMA is mostly init noise for the first 30+ epochs on small data.
+    # 0.99 converges within ~500 steps. Drop EMA entirely if training <500 total steps.
     use_ema: bool = True
-    ema_decay: float = 0.9999
+    ema_decay: float = 0.99
+    ema_warmup_steps: int = 50  # Skip EMA updates until raw model has moved meaningfully
 
     # --- Checkpointing ---
     save_dir: str = "./runs"
