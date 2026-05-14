@@ -65,14 +65,25 @@ class BoxVision(nn.Module):
         self._grids_built = True
 
     def forward(self, x: torch.Tensor):
+        """Raw head outputs only — ONNX-traceable. Same return shape in train and eval.
+
+        Use `predict()` for PyTorch inference with decode + NMS post-processing.
+        """
         features = self.backbone(x)
         fpn_features = self.fpn(features)
         objectness, bbox_reg, centerness = self.head(fpn_features)
+        return objectness, bbox_reg, centerness
 
-        if self.training:
-            return objectness, bbox_reg, centerness
-
-        return self._decode_and_nms(objectness, bbox_reg, centerness, x.shape[2:])
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor):
+        """PyTorch-only inference: forward + decode + NMS. Returns list[dict]."""
+        was_training = self.training
+        self.eval()
+        try:
+            objectness, bbox_reg, centerness = self.forward(x)
+            return self._decode_and_nms(objectness, bbox_reg, centerness, x.shape[2:])
+        finally:
+            self.train(was_training)
 
     def decode_raw(self, objectness, bbox_reg, centerness, image_size):
         """

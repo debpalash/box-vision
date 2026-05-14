@@ -200,8 +200,8 @@ def evaluate_model(
         images = batch["images"].to(device)
         gt_boxes_batch = batch["boxes"]
 
-        # Forward pass (eval mode returns decoded detections)
-        results = model(images)
+        # predict() = forward + decode + NMS. forward() alone returns raw head tensors (ONNX-safe).
+        results = model.predict(images)
 
         for i, result in enumerate(results):
             all_pred_boxes.append(result["boxes"].cpu())
