@@ -30,11 +30,12 @@ from albumentations.pytorch import ToTensorV2
 
 class BoxDataset(Dataset):
     """
-    Class-agnostic bounding box dataset with optional mosaic augmentation.
+    Bounding box dataset with optional class supervision and mosaic augmentation.
 
-    Loads images and bounding box annotations in COCO format.
-    All categories are treated as a single "object" class — we only
-    care about locating boxes, not classifying them.
+    Loads images and bounding box annotations in COCO format. When
+    `class_agnostic=True` every annotation is collapsed to a single "object"
+    class (matches the original class-agnostic BoxVision). When False, the
+    real COCO category_id is remapped to a dense 0..C-1 index.
     """
 
     def __init__(
@@ -45,6 +46,7 @@ class BoxDataset(Dataset):
         transforms: Optional[Callable] = None,
         is_training: bool = True,
         mosaic: bool = False,
+        class_agnostic: bool = True,
     ):
         """
         Args:
@@ -54,11 +56,14 @@ class BoxDataset(Dataset):
             transforms: Albumentations transform pipeline
             is_training: Whether this is a training set
             mosaic: Enable mosaic augmentation (4-image composite)
+            class_agnostic: If True, all categories collapse to label=0 (one class).
+                If False, build a dense category mapping and emit per-box class indices.
         """
         self.image_dir = image_dir
         self.input_size = input_size
         self.is_training = is_training
         self.mosaic = mosaic and is_training  # Only during training
+        self.class_agnostic = class_agnostic
 
         # Load COCO annotations
         with open(annotation_file, "r") as f:
@@ -67,17 +72,33 @@ class BoxDataset(Dataset):
         # Build image ID -> filename mapping
         self.images = {img["id"]: img for img in coco_data["images"]}
 
-        # Build image ID -> list of bbox annotations
+        # Build dense category mapping: category_id -> 0..C-1, and the inverse names list.
+        # Roboflow exports often include a "supercategory" entry (id 0) with no annotations;
+        # filter to categories actually referenced and sort by id for determinism.
+        raw_categories = sorted(coco_data.get("categories", []), key=lambda c: c["id"])
+        referenced_ids = {ann["category_id"] for ann in coco_data.get("annotations", [])}
+        kept = [c for c in raw_categories if c["id"] in referenced_ids]
+        self.category_id_to_idx = {c["id"]: i for i, c in enumerate(kept)}
+        self.class_names = [c["name"] for c in kept]
+        self.num_classes = 1 if class_agnostic else len(self.class_names)
+
+        # Build image ID -> list of (bbox, dense_label) annotations
         self.annotations = {}
         for ann in coco_data.get("annotations", []):
             img_id = ann["image_id"]
             if img_id not in self.annotations:
-                self.annotations[img_id] = []
+                self.annotations[img_id] = {"boxes": [], "labels": []}
 
             # COCO format: [x, y, w, h] -> convert to [x1, y1, x2, y2]
             x, y, w, h = ann["bbox"]
             if w > 0 and h > 0:  # Skip degenerate boxes
-                self.annotations[img_id].append([x, y, x + w, y + h])
+                self.annotations[img_id]["boxes"].append([x, y, x + w, y + h])
+                if class_agnostic:
+                    self.annotations[img_id]["labels"].append(0)
+                else:
+                    self.annotations[img_id]["labels"].append(
+                        self.category_id_to_idx[ann["category_id"]]
+                    )
 
         # Only keep images that exist on disk
         self.image_ids = []
@@ -95,7 +116,7 @@ class BoxDataset(Dataset):
             self.transforms = self._val_transforms()
 
     def _load_image_and_boxes(self, idx: int):
-        """Load a single image and its boxes (before any transforms)."""
+        """Load a single image with its boxes and class labels (before transforms)."""
         img_id = self.image_ids[idx]
         img_info = self.images[img_id]
 
@@ -103,10 +124,15 @@ class BoxDataset(Dataset):
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        boxes = self.annotations.get(img_id, [])
-        boxes = np.array(boxes, dtype=np.float32) if boxes else np.zeros((0, 4), dtype=np.float32)
+        ann = self.annotations.get(img_id, {"boxes": [], "labels": []})
+        if ann["boxes"]:
+            boxes = np.array(ann["boxes"], dtype=np.float32)
+            labels = np.array(ann["labels"], dtype=np.int64)
+        else:
+            boxes = np.zeros((0, 4), dtype=np.float32)
+            labels = np.zeros((0,), dtype=np.int64)
 
-        return image, boxes, img_id
+        return image, boxes, labels, img_id
 
     def _mosaic_4(self, idx: int):
         """
@@ -130,6 +156,7 @@ class BoxDataset(Dataset):
 
         canvas = np.full((target_h, target_w, 3), 114, dtype=np.uint8)
         all_boxes = []
+        all_labels = []
 
         # Quadrants: top-left, top-right, bottom-left, bottom-right
         placements = [
@@ -141,7 +168,7 @@ class BoxDataset(Dataset):
         ]
 
         for i, (quad_idx, (qx1, qy1, qx2, qy2)) in enumerate(zip(indices, placements)):
-            image, boxes, _ = self._load_image_and_boxes(quad_idx)
+            image, boxes, labels, _ = self._load_image_and_boxes(quad_idx)
             h, w = image.shape[:2]
             quad_w = qx2 - qx1
             quad_h = qy2 - qy1
@@ -184,16 +211,20 @@ class BoxDataset(Dataset):
                 h_box = scaled_boxes[:, 3] - scaled_boxes[:, 1]
                 keep = (w_box > 2) & (h_box > 2)
                 scaled_boxes = scaled_boxes[keep]
+                scaled_labels = labels[keep]
 
                 if len(scaled_boxes) > 0:
                     all_boxes.append(scaled_boxes)
+                    all_labels.append(scaled_labels)
 
         if all_boxes:
             all_boxes = np.concatenate(all_boxes, axis=0)
+            all_labels = np.concatenate(all_labels, axis=0)
         else:
             all_boxes = np.zeros((0, 4), dtype=np.float32)
+            all_labels = np.zeros((0,), dtype=np.int64)
 
-        return canvas, all_boxes
+        return canvas, all_boxes, all_labels
 
     def _train_transforms(self) -> A.Compose:
         """Training augmentation pipeline."""
@@ -264,16 +295,15 @@ class BoxDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         """
-        Returns:
-            dict with:
-                'image': [3, H, W] normalized tensor
-                'boxes': [N, 4] tensor in (x1, y1, x2, y2) format
-                'image_id': original image ID
+        Returns dict with:
+            image:    [3, H, W] normalized tensor
+            boxes:    [N, 4] tensor in (x1, y1, x2, y2) format
+            labels:   [N] long tensor of class indices (all zeros if class_agnostic)
+            image_id: original COCO image ID
         """
         if self.mosaic and random.random() < 0.8:
             # Mosaic: 80% probability during training
-            image, boxes = self._mosaic_4(idx)
-            labels = np.zeros(len(boxes), dtype=np.int64)
+            image, boxes, labels = self._mosaic_4(idx)
 
             mosaic_t = self._mosaic_transforms()
             transformed = mosaic_t(
@@ -284,8 +314,7 @@ class BoxDataset(Dataset):
             img_id = self.image_ids[idx]
         else:
             # Standard single-image path
-            image, boxes, img_id = self._load_image_and_boxes(idx)
-            labels = np.zeros(len(boxes), dtype=np.int64)
+            image, boxes, labels, img_id = self._load_image_and_boxes(idx)
 
             transformed = self.transforms(
                 image=image,
@@ -297,12 +326,15 @@ class BoxDataset(Dataset):
 
         if len(transformed["bboxes"]) > 0:
             boxes = torch.tensor(transformed["bboxes"], dtype=torch.float32)
+            labels = torch.tensor(transformed["labels"], dtype=torch.long)
         else:
             boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.long)
 
         return {
             "image": image,
             "boxes": boxes,
+            "labels": labels,
             "image_id": img_id,
         }
 
@@ -315,16 +347,18 @@ def collate_fn(batch: List[dict]) -> dict:
     """
     Custom collate function for variable-length box annotations.
 
-    Stacks images into a batch tensor but keeps boxes as a list
-    (since each image can have different number of boxes).
+    Stacks images into a batch tensor but keeps boxes and labels as lists
+    (since each image can have a different number of objects).
     """
     images = torch.stack([item["image"] for item in batch])
     boxes = [item["boxes"] for item in batch]
+    labels = [item["labels"] for item in batch]
     image_ids = [item["image_id"] for item in batch]
 
     return {
         "images": images,
         "boxes": boxes,
+        "labels": labels,
         "image_ids": image_ids,
     }
 
@@ -338,6 +372,7 @@ def build_dataloader(
     is_training: bool = True,
     transforms: Optional[Callable] = None,
     mosaic: bool = False,
+    class_agnostic: bool = True,
 ) -> DataLoader:
     """Factory function to create a DataLoader."""
     dataset = BoxDataset(
@@ -347,6 +382,7 @@ def build_dataloader(
         transforms=transforms,
         is_training=is_training,
         mosaic=mosaic,
+        class_agnostic=class_agnostic,
     )
 
     return DataLoader(

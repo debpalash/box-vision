@@ -22,7 +22,25 @@ road-signs:
   format: coco
   root: datasets/coco
   class_agnostic: true
-  description: Roboflow road-signs v2 — 21 traffic-sign classes, collapsed for class-agnostic training
+  description: Roboflow road-signs v2 — 21 sign types collapsed into one "object" class (BoxVision is class-agnostic by design)
+  license: CC BY 4.0
+  source: https://universe.roboflow.com/roboflow-100/road-signs-6ih4y
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+    test:
+      images: test
+      annotations: test/_annotations.coco.json
+
+road-signs-multiclass:
+  format: coco
+  root: datasets/coco
+  class_agnostic: false
+  description: Same data, 21 distinct sign classes (kept around for multi-class ablations; not the default)
   license: CC BY 4.0
   source: https://universe.roboflow.com/roboflow-100/road-signs-6ih4y
   splits:

@@ -1,11 +1,15 @@
 """
 Detection head v2: minimal, no centerness, no DFL.
 
-v2 changes:
-- Removed centerness branch (YOLO26 validated this isn't needed)
-- Reduced to 1 conv per branch (was 2)
-- No DFL (aligned with YOLO26's design)
-- Pure objectness + bbox regression only
+Outputs per FPN level:
+  - objectness: 1 channel (is there an object here?)
+  - bbox_reg:   4 channels (l, t, r, b distances)
+  - class_logits: num_classes channels, only when num_classes > 1
+  - centerness: 1 channel, only when use_centerness=True
+
+When num_classes == 1 the model behaves like the original class-agnostic
+BoxVision. When num_classes > 1 a class prediction head is added; final
+detection score = sigmoid(objectness) * sigmoid(class_logits[k]).
 """
 
 import torch
@@ -43,18 +47,25 @@ class FCOSHead(nn.Module):
         use_depthwise: bool = True,
         use_centerness: bool = False,
         num_levels: int = 3,
+        num_classes: int = 1,
     ):
         super().__init__()
         self.use_centerness = use_centerness
+        self.num_classes = num_classes
+        self.multi_class = num_classes > 1
 
         ConvBlock = DepthwiseSeparableConv if use_depthwise else _StandardConvBlock
 
-        # Objectness branch
+        # Objectness branch (shared by class head when multi-class — keeps params small)
         obj_layers = []
         for _ in range(num_convs):
             obj_layers.append(ConvBlock(in_channels, in_channels))
         self.obj_tower = nn.Sequential(*obj_layers)
         self.obj_pred = nn.Conv2d(in_channels, 1, kernel_size=3, padding=1)
+
+        # Class branch (only when multi-class). Reuses obj_tower features.
+        if self.multi_class:
+            self.class_pred = nn.Conv2d(in_channels, num_classes, kernel_size=3, padding=1)
 
         # BBox regression branch
         bbox_layers = []
@@ -89,6 +100,11 @@ class FCOSHead(nn.Module):
         nn.init.normal_(self.bbox_pred.weight, std=0.01)
         nn.init.zeros_(self.bbox_pred.bias)
 
+        if self.multi_class:
+            # Match objectness prior for class logits — start each class near 0.01
+            nn.init.normal_(self.class_pred.weight, std=0.01)
+            nn.init.constant_(self.class_pred.bias, bias_value)
+
         if self.use_centerness:
             nn.init.normal_(self.centerness_pred.weight, std=0.01)
             nn.init.zeros_(self.centerness_pred.bias)
@@ -99,19 +115,25 @@ class FCOSHead(nn.Module):
             features: List of FPN outputs [P3, P4, P5], each [B, C, Hi, Wi]
 
         Returns:
-            objectness: List of [B, 1, Hi, Wi] per level (logits)
-            bbox_reg:   List of [B, 4, Hi, Wi] per level (l, t, r, b)
-            centerness: List of [B, 1, Hi, Wi] per level, or None
+            objectness:   List of [B, 1, Hi, Wi] per level (logits)
+            bbox_reg:     List of [B, 4, Hi, Wi] per level (l, t, r, b)
+            class_logits: List of [B, num_classes, Hi, Wi] per level, or None (class-agnostic)
+            centerness:   List of [B, 1, Hi, Wi] per level, or None
         """
         all_objectness = []
         all_bbox_reg = []
-        all_centerness = []
+        all_class_logits: List[torch.Tensor] = []
+        all_centerness: List[torch.Tensor] = []
 
         for level_idx, feat in enumerate(features):
-            # Objectness
+            # Objectness (shared tower for obj + class)
             obj_feat = self.obj_tower(feat)
             objectness = self.obj_pred(obj_feat)
             all_objectness.append(objectness)
+
+            # Class logits (multi-class only)
+            if self.multi_class:
+                all_class_logits.append(self.class_pred(obj_feat))
 
             # BBox regression
             bbox_feat = self.bbox_tower(feat)
@@ -125,8 +147,9 @@ class FCOSHead(nn.Module):
                 centerness = self.centerness_pred(obj_feat)
                 all_centerness.append(centerness)
 
+        class_logits_out = all_class_logits if self.multi_class else None
         centerness_out = all_centerness if self.use_centerness else None
-        return all_objectness, all_bbox_reg, centerness_out
+        return all_objectness, all_bbox_reg, class_logits_out, centerness_out
 
 
 class _StandardConvBlock(nn.Module):

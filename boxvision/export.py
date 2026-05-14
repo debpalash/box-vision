@@ -69,7 +69,7 @@ class BoxVisionONNXExporter:
             output_path,
             opset_version=self.config.opset_version,
             input_names=["input"],
-            output_names=["boxes", "scores"],
+            output_names=["boxes", "scores", "labels"],
             dynamic_axes=dynamic_axes,
         )
 
@@ -122,9 +122,11 @@ class _ONNXExportWrapper(nn.Module):
     """
     Wrapper for ONNX export that returns flat tensors.
 
-    Uses decode_raw() which outputs [B, N, 4] boxes and [B, N] scores
+    Uses decode_raw() which outputs [B, N, 4] boxes, [B, N] scores, [B, N] labels
     without NMS or dynamic control flow — clean ONNX graph.
     NMS is handled in the ONNX Runtime postprocess step.
+
+    For class-agnostic models (num_classes=1) labels are all zeros.
     """
 
     def __init__(self, model: BoxVision):
@@ -135,12 +137,12 @@ class _ONNXExportWrapper(nn.Module):
     def forward(self, x: torch.Tensor):
         features = self.model.backbone(x)
         fpn_features = self.model.fpn(features)
-        objectness, bbox_reg, centerness = self.model.head(fpn_features)
-        boxes, scores = self.model.decode_raw(
-            objectness, bbox_reg, centerness, x.shape[2:]
+        objectness, bbox_reg, class_logits, centerness = self.model.head(fpn_features)
+        boxes, scores, labels = self.model.decode_raw(
+            objectness, bbox_reg, class_logits, centerness, x.shape[2:]
         )
         # Squeeze batch dim for single-image export
-        return boxes[0], scores[0]
+        return boxes[0], scores[0], labels[0]
 
 
 

@@ -26,6 +26,11 @@ class ModelConfig:
     head_num_convs: int = 1
     head_use_depthwise: bool = True
 
+    # --- Multi-class ---
+    # num_classes = 1 → class-agnostic (objectness only, the original BoxVision)
+    # num_classes > 1 → multi-class detection (adds a class_pred head)
+    num_classes: int = 1
+
     # --- Objectness ---
     objectness_threshold: float = 0.05
     nms_threshold: float = 0.50
@@ -92,6 +97,7 @@ class TrainConfig:
     # --- Loss weights ---
     loss_objectness_weight: float = 4.0
     loss_bbox_weight: float = 2.0
+    loss_class_weight: float = 1.0  # Multi-class only
 
     # --- Focal loss params ---
     focal_alpha: float = 0.75

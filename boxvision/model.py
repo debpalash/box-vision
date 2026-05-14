@@ -46,6 +46,7 @@ class BoxVision(nn.Module):
             use_depthwise=self.config.head_use_depthwise,
             use_centerness=self.config.use_centerness,
             num_levels=len(self.config.strides),
+            num_classes=self.config.num_classes,
         )
 
         self.strides = self.config.strides
@@ -67,33 +68,52 @@ class BoxVision(nn.Module):
     def forward(self, x: torch.Tensor):
         """Raw head outputs only — ONNX-traceable. Same return shape in train and eval.
 
+        Returns 4-tuple:
+            objectness:   list[Tensor]  per FPN level, [B,1,H,W] logits
+            bbox_reg:     list[Tensor]  per FPN level, [B,4,H,W] decoded l/t/r/b
+            class_logits: list[Tensor] or None — only when num_classes > 1
+            centerness:   list[Tensor] or None — only when use_centerness=True
+
         Use `predict()` for PyTorch inference with decode + NMS post-processing.
         """
         features = self.backbone(x)
         fpn_features = self.fpn(features)
-        objectness, bbox_reg, centerness = self.head(fpn_features)
-        return objectness, bbox_reg, centerness
+        return self.head(fpn_features)
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor):
-        """PyTorch-only inference: forward + decode + NMS. Returns list[dict]."""
+        """PyTorch-only inference: forward + decode + NMS. Returns list[dict].
+
+        Each dict has:
+            boxes:  [N, 4]  (x1, y1, x2, y2)
+            scores: [N]     final confidence (objectness * class for multi-class)
+            labels: [N]     class index (0 if num_classes == 1)
+        """
         was_training = self.training
         self.eval()
         try:
-            objectness, bbox_reg, centerness = self.forward(x)
-            return self._decode_and_nms(objectness, bbox_reg, centerness, x.shape[2:])
+            outputs = self.forward(x)
+            return self._decode_and_nms(*outputs, image_size=x.shape[2:])
         finally:
             self.train(was_training)
 
-    def decode_raw(self, objectness, bbox_reg, centerness, image_size):
+    def decode_raw(self, objectness, bbox_reg, class_logits, centerness, image_size):
         """
-        Decode head outputs to boxes + scores tensors (ONNX-safe).
+        Decode head outputs to boxes/scores/labels tensors (ONNX-safe).
 
         No NMS, no dynamic ops. Returns all decoded predictions concatenated.
 
+        Args:
+            objectness:   list of [B,1,H,W] per FPN level
+            bbox_reg:     list of [B,4,H,W] per FPN level
+            class_logits: list of [B,C,H,W] per FPN level, or None
+            centerness:   list of [B,1,H,W] per FPN level, or None
+            image_size:   (H, W)
+
         Returns:
-            boxes: [B, N, 4] in (x1, y1, x2, y2) format
-            scores: [B, N] objectness scores (sigmoid)
+            boxes:  [B, N, 4] in (x1, y1, x2, y2) format
+            scores: [B, N] confidence — for multi-class this is obj*max_class
+            labels: [B, N] class index (all zeros when num_classes == 1)
         """
         device = objectness[0].device
         H, W = image_size
@@ -104,10 +124,12 @@ class BoxVision(nn.Module):
         batch_size = objectness[0].shape[0]
         batch_boxes = []
         batch_scores = []
+        batch_labels = []
 
         for b in range(batch_size):
             level_boxes = []
             level_scores = []
+            level_labels = []
 
             for level_idx in range(len(self.strides)):
                 obj = objectness[level_idx][b, 0]
@@ -116,7 +138,20 @@ class BoxVision(nn.Module):
 
                 obj_flat = obj.reshape(-1)
                 bbox_flat = bbox.permute(1, 2, 0).reshape(-1, 4)
-                scores = torch.sigmoid(obj_flat)
+                obj_scores = torch.sigmoid(obj_flat)
+
+                if class_logits is not None:
+                    # Multi-class: combine objectness with per-class probability.
+                    # Use sigmoid per class (not softmax) — multi-label friendly,
+                    # and class_pred bias init expects independent logits.
+                    cls = torch.sigmoid(class_logits[level_idx][b])  # [C, H, W]
+                    cls_flat = cls.reshape(cls.shape[0], -1)          # [C, H*W]
+                    cls_score, cls_label = cls_flat.max(dim=0)         # [H*W], [H*W]
+                    scores = obj_scores * cls_score
+                    labels = cls_label
+                else:
+                    scores = obj_scores
+                    labels = torch.zeros_like(obj_flat, dtype=torch.long)
 
                 if centerness is not None:
                     ctr = torch.sigmoid(centerness[level_idx][b, 0].reshape(-1))
@@ -133,21 +168,30 @@ class BoxVision(nn.Module):
 
                 level_boxes.append(boxes)
                 level_scores.append(scores)
+                level_labels.append(labels)
 
             batch_boxes.append(torch.cat(level_boxes, dim=0))
             batch_scores.append(torch.cat(level_scores, dim=0))
+            batch_labels.append(torch.cat(level_labels, dim=0))
 
-        return torch.stack(batch_boxes), torch.stack(batch_scores)
+        return torch.stack(batch_boxes), torch.stack(batch_scores), torch.stack(batch_labels)
 
     def _decode_and_nms(
         self,
         objectness: List[torch.Tensor],
         bbox_reg: List[torch.Tensor],
+        class_logits: Optional[List[torch.Tensor]],
         centerness: Optional[List[torch.Tensor]],
         image_size: Tuple[int, int],
     ) -> List[dict]:
-        """Full decode + NMS (PyTorch inference only, not for ONNX)."""
-        all_boxes, all_scores = self.decode_raw(objectness, bbox_reg, centerness, image_size)
+        """Full decode + NMS (PyTorch inference only, not for ONNX).
+
+        Class-aware NMS via torchvision.ops.batched_nms: detections with
+        different class labels don't suppress each other.
+        """
+        all_boxes, all_scores, all_labels = self.decode_raw(
+            objectness, bbox_reg, class_logits, centerness, image_size
+        )
         device = all_boxes.device
         batch_size = all_boxes.shape[0]
         results = []
@@ -155,25 +199,29 @@ class BoxVision(nn.Module):
         for b in range(batch_size):
             boxes = all_boxes[b]
             scores = all_scores[b]
+            labels = all_labels[b]
 
             keep = scores > self.config.objectness_threshold
             if keep.sum() == 0:
                 results.append({
                     "boxes": torch.zeros(0, 4, device=device),
                     "scores": torch.zeros(0, device=device),
+                    "labels": torch.zeros(0, dtype=torch.long, device=device),
                 })
                 continue
 
             boxes = boxes[keep]
             scores = scores[keep]
+            labels = labels[keep]
 
-            keep_nms = ops.nms(boxes, scores, self.config.nms_threshold)
+            keep_nms = ops.batched_nms(boxes, scores, labels, self.config.nms_threshold)
             if len(keep_nms) > self.config.max_detections:
                 keep_nms = keep_nms[:self.config.max_detections]
 
             results.append({
                 "boxes": boxes[keep_nms],
                 "scores": scores[keep_nms],
+                "labels": labels[keep_nms],
             })
 
         return results
@@ -202,7 +250,10 @@ class ModelEMA:
     def __init__(self, model: nn.Module, decay: float = 0.99, warmup_steps: int = 50):
         self.decay = decay
         self.warmup_steps = warmup_steps
-        self.ema_model = BoxVision(model.config)
+        # Match the source model's device so EMA mul_/add_ ops don't fail
+        # with mixed-device tensors when the source model is on CUDA.
+        device = next(model.parameters()).device
+        self.ema_model = BoxVision(model.config).to(device)
         self.ema_model.load_state_dict(model.state_dict())
         self.ema_model.eval()
         for p in self.ema_model.parameters():

@@ -10,6 +10,7 @@ v2 changes:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import sigmoid_focal_loss
 from typing import List, Optional, Tuple
 
 
@@ -142,7 +143,7 @@ class TaskAlignedAssigner:
         pred_boxes: torch.Tensor,     # [num_points, 4] predicted boxes (xyxy)
         gt_boxes: torch.Tensor,       # [num_gt, 4] ground truth boxes (xyxy)
         points: torch.Tensor,         # [num_points, 2] grid center points (x, y)
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Assign GT boxes to prediction points using task-aligned metric.
 
@@ -150,6 +151,7 @@ class TaskAlignedAssigner:
             labels: [num_points] soft/hard labels (IoU or 1.0 for positives)
             bbox_targets: [num_points, 4] target boxes for positives (xyxy)
             assign_metrics: [num_points] alignment metric for positive weighting
+            assigned_gt: [num_points] long tensor of GT index per point (only valid where labels > 0)
         """
         num_points = points.shape[0]
         num_gt = gt_boxes.shape[0]
@@ -160,6 +162,7 @@ class TaskAlignedAssigner:
                 torch.zeros(num_points, device=device),
                 torch.zeros(num_points, 4, device=device),
                 torch.zeros(num_points, device=device),
+                torch.zeros(num_points, dtype=torch.long, device=device),
             )
 
         # 1. Filter: only consider points inside GT boxes
@@ -213,7 +216,7 @@ class TaskAlignedAssigner:
         assign_metrics = alignment[torch.arange(num_points, device=device), assigned_gt]
         assign_metrics = assign_metrics * is_positive.float()
 
-        return labels, bbox_targets, assign_metrics
+        return labels, bbox_targets, assign_metrics, assigned_gt
 
 
 class BoxVisionLoss(nn.Module):
@@ -230,6 +233,7 @@ class BoxVisionLoss(nn.Module):
         focal_gamma: float = 2.0,
         objectness_weight: float = 1.0,
         bbox_weight: float = 2.0,
+        class_weight: float = 1.0,
         strides: List[int] = None,
         tal_topk: int = 10,
         tal_alpha: float = 0.5,
@@ -241,6 +245,9 @@ class BoxVisionLoss(nn.Module):
         self.giou_loss = GIoULoss()
         self.objectness_weight = objectness_weight
         self.bbox_weight = bbox_weight
+        self.class_weight = class_weight
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
         self.strides = strides or [8, 16, 32]
 
         self.assigner = TaskAlignedAssigner(
@@ -269,8 +276,10 @@ class BoxVisionLoss(nn.Module):
         self,
         objectness_preds: List[torch.Tensor],
         bbox_preds: List[torch.Tensor],
+        class_logits_preds: Optional[List[torch.Tensor]],
         centerness_preds: Optional[List[torch.Tensor]],
         gt_boxes_batch: List[torch.Tensor],
+        gt_labels_batch: Optional[List[torch.Tensor]] = None,
     ) -> dict:
         """
         Compute losses using TAL assignment.
@@ -278,15 +287,20 @@ class BoxVisionLoss(nn.Module):
         Args:
             objectness_preds: List of [B, 1, Hi, Wi] per level
             bbox_preds: List of [B, 4, Hi, Wi] per level
+            class_logits_preds: List of [B, C, Hi, Wi] per level, or None (Step 3 adds the loss term)
             centerness_preds: Ignored in v2 (kept for API compat)
             gt_boxes_batch: List of [Mi, 4] GT boxes per image (x1,y1,x2,y2)
+            gt_labels_batch: List of [Mi] class indices per image, or None (Step 3 wires it up)
         """
         device = objectness_preds[0].device
         batch_size = objectness_preds[0].shape[0]
         num_levels = len(objectness_preds)
+        multi_class = class_logits_preds is not None
+        num_classes = class_logits_preds[0].shape[1] if multi_class else 0
 
         total_obj_loss = torch.tensor(0.0, device=device)
         total_bbox_loss = torch.tensor(0.0, device=device)
+        total_class_loss = torch.tensor(0.0, device=device)
         total_positives = 0
 
         for b in range(batch_size):
@@ -294,6 +308,7 @@ class BoxVisionLoss(nn.Module):
             all_obj = []
             all_bbox = []
             all_points = []
+            all_class = [] if multi_class else None
 
             for level_idx in range(num_levels):
                 stride = self.strides[level_idx]
@@ -309,9 +324,15 @@ class BoxVisionLoss(nn.Module):
                 all_bbox.append((bbox_flat, points, stride))
                 all_points.append(points)
 
+                if multi_class:
+                    # [C, H, W] → [H*W, C]
+                    cls = class_logits_preds[level_idx][b].permute(1, 2, 0).reshape(-1, num_classes)
+                    all_class.append(cls)
+
             # Concatenate across levels
             cat_obj = torch.cat([o for o in all_obj], dim=0)
             cat_points = torch.cat(all_points, dim=0)
+            cat_class = torch.cat(all_class, dim=0) if multi_class else None
 
             # Decode bbox predictions to xyxy
             cat_bbox_decoded = []
@@ -324,14 +345,14 @@ class BoxVisionLoss(nn.Module):
             gt_boxes = gt_boxes_batch[b].to(device)
             obj_scores = torch.sigmoid(cat_obj)
 
-            labels, bbox_targets, assign_metrics = self.assigner.assign(
+            labels, bbox_targets, assign_metrics, assigned_gt = self.assigner.assign(
                 obj_scores, cat_bbox_decoded, gt_boxes, cat_points
             )
 
             # Objectness loss (all points)
             total_obj_loss = total_obj_loss + self.obj_loss_fn(cat_obj, labels)
 
-            # BBox loss (positive points only)
+            # BBox + class loss (positive points only)
             pos_mask = labels > 0
             num_pos = pos_mask.sum().item()
             total_positives += num_pos
@@ -341,19 +362,45 @@ class BoxVisionLoss(nn.Module):
                 pos_target = bbox_targets[pos_mask]
                 total_bbox_loss = total_bbox_loss + self.giou_loss(pos_pred, pos_target)
 
+                if multi_class and gt_labels_batch is not None:
+                    gt_labels = gt_labels_batch[b].to(device)
+                    # Class index for each positive: gt_labels[assigned_gt[positive_idx]]
+                    pos_gt_idx = assigned_gt[pos_mask]
+                    pos_class_target_idx = gt_labels[pos_gt_idx]  # [P]
+                    pos_class_logits = cat_class[pos_mask]         # [P, C]
+
+                    # Hard one-hot target — soft IoU weighting collapses at init
+                    # (IoU ≈ 0 → target ≈ 0 → no gradient signal for class). The
+                    # objectness branch already encodes "how confident this is an
+                    # object" via soft labels; class is just "which one of N".
+                    target_onehot = torch.zeros_like(pos_class_logits)
+                    target_onehot[torch.arange(num_pos, device=device), pos_class_target_idx] = 1.0
+
+                    # Sigmoid focal loss (per-class binary). Normalize by num_pos
+                    # so the magnitude matches obj/bbox losses.
+                    cls_loss = sigmoid_focal_loss(
+                        pos_class_logits, target_onehot,
+                        alpha=self.focal_alpha, gamma=self.focal_gamma,
+                    )
+                    total_class_loss = total_class_loss + cls_loss.sum() / max(num_pos, 1)
+
         # Normalize
         total_obj_loss = total_obj_loss / batch_size
         total_bbox_loss = total_bbox_loss / max(batch_size, 1)
+        total_class_loss = total_class_loss / max(batch_size, 1)
 
         total_loss = (
             self.objectness_weight * total_obj_loss +
             self.bbox_weight * total_bbox_loss
         )
+        if multi_class:
+            total_loss = total_loss + self.class_weight * total_class_loss
 
         return {
             "total_loss": total_loss,
             "objectness_loss": total_obj_loss.detach(),
             "bbox_loss": total_bbox_loss.detach(),
+            "class_loss": total_class_loss.detach(),
             "centerness_loss": torch.tensor(0.0),  # v2: removed, kept for compat
             "num_positives": total_positives,
         }

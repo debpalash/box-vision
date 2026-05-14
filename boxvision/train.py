@@ -60,6 +60,30 @@ class Trainer:
         self.model_config = model_config or ModelConfig()
         self.train_config = train_config or TrainConfig()
 
+        # Reconcile num_classes with the chosen dataset. The dataset spec is the
+        # source of truth: class_agnostic=True ⇒ num_classes=1; otherwise build a
+        # peek dataset to count actual referenced categories.
+        self.dataset_spec = load_dataset(self.train_config.dataset)
+        if self.dataset_spec.class_agnostic:
+            if self.model_config.num_classes != 1:
+                print(f"  (dataset is class-agnostic; overriding num_classes "
+                      f"{self.model_config.num_classes} → 1)")
+            self.model_config.num_classes = 1
+        else:
+            from .dataset import BoxDataset  # lazy import to avoid cycle
+            peek = BoxDataset(
+                image_dir=self.dataset_spec.train.images,
+                annotation_file=self.dataset_spec.train.annotations,
+                is_training=False,
+                class_agnostic=False,
+            )
+            inferred = peek.num_classes
+            if self.model_config.num_classes != inferred:
+                print(f"  (dataset has {inferred} classes; overriding num_classes "
+                      f"{self.model_config.num_classes} → {inferred})")
+            self.model_config.num_classes = inferred
+            self.class_names = peek.class_names
+
         self.device = torch.device(self.train_config.device)
         self.model = build_model(self.model_config).to(self.device)
 
@@ -82,6 +106,7 @@ class Trainer:
             focal_gamma=self.train_config.focal_gamma,
             objectness_weight=self.train_config.loss_objectness_weight,
             bbox_weight=self.train_config.loss_bbox_weight,
+            class_weight=self.train_config.loss_class_weight,
             strides=self.model_config.strides,
             tal_topk=self.train_config.tal_topk,
             tal_alpha=self.train_config.tal_alpha,
@@ -115,10 +140,9 @@ class Trainer:
         """
         Build training and validation dataloaders from the dataset registry.
 
-        Reads the dataset spec from datasets.yaml via boxvision.registry.
-        The dataset name is taken from TrainConfig.dataset.
+        Uses the spec resolved in __init__ (which also reconciles num_classes).
         """
-        spec = load_dataset(self.train_config.dataset)
+        spec = self.dataset_spec
         errors = verify_dataset(spec)
         if errors:
             raise FileNotFoundError(
@@ -132,7 +156,8 @@ class Trainer:
                 f"YOLO loader is planned (see BLUEPRINT.md M0)."
             )
 
-        print(f"Dataset: {spec.name} ({spec.format}) — {spec.description}")
+        mode = "class-agnostic" if spec.class_agnostic else f"multi-class ({self.model_config.num_classes})"
+        print(f"Dataset: {spec.name} ({spec.format}, {mode}) — {spec.description}")
 
         self.train_loader = build_dataloader(
             image_dir=spec.train.images,
@@ -142,6 +167,7 @@ class Trainer:
             num_workers=self.train_config.num_workers,
             is_training=True,
             mosaic=self.train_config.mosaic,
+            class_agnostic=spec.class_agnostic,
         )
 
         self.val_loader = build_dataloader(
@@ -151,6 +177,7 @@ class Trainer:
             batch_size=self.train_config.batch_size,
             num_workers=self.train_config.num_workers,
             is_training=False,
+            class_agnostic=spec.class_agnostic,
         )
 
         print(f"Training samples: {len(self.train_loader.dataset)}")
@@ -164,6 +191,7 @@ class Trainer:
         total_loss = 0.0
         total_obj_loss = 0.0
         total_bbox_loss = 0.0
+        total_class_loss = 0.0
         total_positives = 0
         num_batches = 0
 
@@ -178,8 +206,11 @@ class Trainer:
 
             use_amp = self.train_config.amp and self.device.type == "cuda"
             with autocast(enabled=use_amp):
-                objectness, bbox_reg, centerness = self.model(images)
-                losses = self.criterion(objectness, bbox_reg, centerness, gt_boxes)
+                objectness, bbox_reg, class_logits, centerness = self.model(images)
+                losses = self.criterion(
+                    objectness, bbox_reg, class_logits, centerness,
+                    gt_boxes, batch.get("labels"),
+                )
 
             self.scaler.scale(losses["total_loss"]).backward()
             self.scaler.unscale_(self.optimizer)
@@ -194,21 +225,26 @@ class Trainer:
             total_loss += losses["total_loss"].item()
             total_obj_loss += losses["objectness_loss"].item()
             total_bbox_loss += losses["bbox_loss"].item()
+            total_class_loss += losses.get("class_loss", torch.tensor(0.0)).item()
             total_positives += losses["num_positives"]
             num_batches += 1
 
-            pbar.set_postfix({
+            postfix = {
                 "loss": f"{losses['total_loss'].item():.4f}",
                 "obj": f"{losses['objectness_loss'].item():.4f}",
                 "bbox": f"{losses['bbox_loss'].item():.4f}",
-                "pos": losses["num_positives"],
-                "lr": f"{current_lr:.6f}",
-            })
+            }
+            if self.model_config.num_classes > 1:
+                postfix["cls"] = f"{losses['class_loss'].item():.4f}"
+            postfix["pos"] = losses["num_positives"]
+            postfix["lr"] = f"{current_lr:.6f}"
+            pbar.set_postfix(postfix)
 
         return {
             "loss": total_loss / max(num_batches, 1),
             "obj_loss": total_obj_loss / max(num_batches, 1),
             "bbox_loss": total_bbox_loss / max(num_batches, 1),
+            "class_loss": total_class_loss / max(num_batches, 1),
             "positives": total_positives,
             "lr": current_lr,
         }
@@ -221,14 +257,17 @@ class Trainer:
         and use the raw model's mAP for "best" selection — EMA can only be
         trusted once `ema.updates` is well into the hundreds.
         """
+        names = getattr(self, "class_names", None)
         raw_metrics = evaluate_model(
             self.model, self.val_loader, device=self.device, iou_threshold=0.5,
+            class_names=names,
         )
         out = {f"raw_{k}": v for k, v in raw_metrics.items()}
 
         if self.ema is not None:
             ema_metrics = evaluate_model(
                 self.ema.ema_model, self.val_loader, device=self.device, iou_threshold=0.5,
+                class_names=names,
             )
             out.update({f"ema_{k}": v for k, v in ema_metrics.items()})
 
@@ -316,9 +355,13 @@ class Trainer:
             train_metrics = self.train_one_epoch(epoch)
 
             print(f"\nEpoch {epoch+1} Summary:")
-            print(f"  Loss: {train_metrics['loss']:.4f} "
-                  f"(obj: {train_metrics['obj_loss']:.4f}, "
-                  f"bbox: {train_metrics['bbox_loss']:.4f})")
+            parts = [
+                f"obj: {train_metrics['obj_loss']:.4f}",
+                f"bbox: {train_metrics['bbox_loss']:.4f}",
+            ]
+            if self.model_config.num_classes > 1:
+                parts.append(f"cls: {train_metrics['class_loss']:.4f}")
+            print(f"  Loss: {train_metrics['loss']:.4f} ({', '.join(parts)})")
             print(f"  Positives: {train_metrics['positives']}, LR: {train_metrics['lr']:.6f}")
 
             # Validate periodically

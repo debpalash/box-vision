@@ -156,21 +156,25 @@ def cmd_info(args):
     from .config import tiny_config, small_config
     from .model import build_model
 
+    nc = args.num_classes
+    mode = "class-agnostic" if nc == 1 else f"multi-class ({nc} classes)"
+
     for name, config_fn in [("tiny", tiny_config), ("small", small_config)]:
-        config = config_fn(pretrained_backbone=False)
+        config = config_fn(pretrained_backbone=False, num_classes=nc)
         model = build_model(config)
         params = model.count_parameters()
 
         ghost = "Ghost-" if config.fpn_use_ghost else ""
-        print(f"BoxVision-{name}")
-        print(f"{'='*40}")
+        print(f"BoxVision-{name}  ({mode})")
+        print(f"{'='*48}")
         print(f"Backbone:     {config.backbone}")
         print(f"Neck:         {ghost}FPN ({config.fpn_out_channels}ch, top-down)")
         print(f"Head:         FCOS ({config.head_num_convs}-conv, DW-sep)")
+        print(f"Classes:      {nc}")
         print(f"Input size:   {config.input_size}")
         print(f"Total params: {params['total']:,}")
         print(f"Model size:   {params['total_mb']:.2f} MB (FP32)")
-        print(f"{'='*40}")
+        print(f"{'='*48}")
         print()
 
 
@@ -226,7 +230,9 @@ def main():
     bench_parser.add_argument("--runs", type=int, default=100, help="Number of benchmark runs")
 
     # --- Info ---
-    subparsers.add_parser("info", help="Print model info")
+    info_parser = subparsers.add_parser("info", help="Print model info")
+    info_parser.add_argument("--num-classes", type=int, default=1,
+                             help="Number of classes (1 = class-agnostic, >1 = multi-class)")
 
     args = parser.parse_args()
 

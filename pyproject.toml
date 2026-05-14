@@ -2,7 +2,7 @@
 name = "boxvision"
 version = "0.1.0"
 description = "Lightweight CPU-optimized class-agnostic bounding box detector"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
