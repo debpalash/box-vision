@@ -39,6 +39,7 @@ Thumbs.db
 # Secrets
 .env
 .env.local
+.boxship.env
 *.key
 *.pem
 

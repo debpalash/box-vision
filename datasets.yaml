@@ -69,6 +69,21 @@ shapes:
       images: valid
       annotations: valid/_annotations.coco.json
 
+shapes-distilled:
+  format: coco
+  root: datasets/shapes-distilled
+  class_agnostic: true
+  description: shapes train split augmented with G@416 teacher pseudo-labels (+48% extra boxes); valid mirrors shapes valid for apples-to-apples eval
+  license: (user-provided)
+  source: distill_pseudo_labels.py from runs/G-aug-300ep/best.pt (conf=0.40, iou-with-gt=0.5)
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 road-signs-yolo:
   format: yolo
   root: datasets/yolo26
