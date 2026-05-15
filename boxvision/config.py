@@ -31,9 +31,16 @@ class ModelConfig:
     # num_classes > 1 → multi-class detection (adds a class_pred head)
     num_classes: int = 1
 
-    # --- Objectness ---
+    # --- Objectness / postprocess ---
+    # nms_threshold = 0.5 keeps the "near-miss" boxes that contribute to
+    # mAP@0.5:0.95. For visual cleanliness ("one box per object"), enable WBF
+    # (fuse clusters via score-weighted average) — gives clean output and
+    # also helps mAP since fused boxes are usually better-localized.
     objectness_threshold: float = 0.05
     nms_threshold: float = 0.50
+    containment_threshold: float = 0.0   # 0 = off; raise (0.4-0.6) for clean viz
+    use_wbf: bool = False                 # if True, replace NMS with WBF
+    wbf_iou_threshold: float = 0.55       # cluster boxes whose IoU exceeds this
     max_detections: int = 100
 
     # --- Input ---
@@ -41,6 +48,10 @@ class ModelConfig:
     input_channels: int = 3
 
     # --- Stride levels ---
+    # When use_p2=True, the backbone exposes its stem (stride 4) and the FPN
+    # gains a P2 level. Pushes small-object recall up substantially at a
+    # modest param/latency cost.
+    use_p2: bool = False
     strides: List[int] = field(default_factory=lambda: [8, 16, 32])
 
     # --- Centerness ---
@@ -104,6 +115,8 @@ class TrainConfig:
     focal_gamma: float = 2.0
 
     # --- TAL assigner params ---
+    # Stays at 10. Lowering to 5 hurt strict-IoU mAP on small datasets
+    # (insufficient positive samples → noisier bbox regression).
     tal_topk: int = 10
     tal_alpha: float = 0.5
     tal_beta: float = 6.0
@@ -113,6 +126,12 @@ class TrainConfig:
     augment: bool = True
     mosaic: bool = True
     mosaic_off_epochs: int = 10
+    # Multi-scale training: when enabled, pick a random input size from
+    # `multiscale_sizes` at the start of each epoch. Trains scale invariance.
+    multiscale: bool = False
+    multiscale_sizes: List[int] = field(default_factory=lambda: [320, 416, 512])
+    mixup: bool = False
+    copy_paste: bool = False
 
     # --- EMA ---
     # Tuned for small datasets (1-2K images): 0.999 takes ~5K steps to converge,

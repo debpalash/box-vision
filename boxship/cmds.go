@@ -56,6 +56,75 @@ func cmdRun(client *Client, command string, pty bool) error {
 	return nil
 }
 
+// cmdWait blocks until a marker string appears in a remote file, then prints
+// a tail of that file and exits. Used to bridge "remote process finished" to
+// the local harness's task-completion notification — run it as a background
+// task and you get a ping when training is done.
+//
+// Implementation: a tiny shell loop on the remote that greps the file every
+// pollSec seconds. Exits 0 on match, 1 on timeout, 2 if file is missing too
+// long.
+func cmdWait(client *Client, logPath, marker string, pollSec, timeoutSec int, tailLines int) error {
+	if marker == "" {
+		marker = "Training complete"
+	}
+	if pollSec <= 0 {
+		pollSec = 30
+	}
+	if tailLines <= 0 {
+		tailLines = 40
+	}
+	// Resolve leading ~/ remotely (the local shell would otherwise expand it
+	// against the local home, pointing at the wrong path).
+	if strings.HasPrefix(logPath, "~/") {
+		logPath = "$HOME/" + logPath[2:]
+	} else if logPath == "~" {
+		logPath = "$HOME"
+	}
+	timeoutClause := ""
+	if timeoutSec > 0 {
+		timeoutClause = fmt.Sprintf(`if [ $waited -ge %d ]; then echo "boxship-wait: timeout after %ds" >&2; exit 1; fi`, timeoutSec, timeoutSec)
+	}
+	// Note: we expand `log` via eval below so $HOME interpolates remotely.
+	script := fmt.Sprintf(`
+set -u
+log=$(eval echo %q)
+marker=%q
+poll=%d
+waited=0
+missing=0
+echo "boxship-wait: watching $log for $marker (poll=${poll}s)"
+while :; do
+    if [ -f "$log" ]; then
+        missing=0
+        if grep -q -- "$marker" "$log"; then
+            echo "boxship-wait: marker hit at $(date)"
+            tail -%d "$log" | tr -d '\r'
+            exit 0
+        fi
+    else
+        missing=$((missing + poll))
+        if [ $missing -ge 300 ]; then
+            echo "boxship-wait: log not found for 5+ minutes: $log" >&2
+            exit 2
+        fi
+    fi
+    sleep $poll
+    waited=$((waited + poll))
+    %s
+done
+`, logPath, marker, pollSec, tailLines, timeoutClause)
+
+	code, err := client.Run(script, false)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("remote wait exited %d", code)
+	}
+	return nil
+}
+
 // cmdUpload copies a local file or directory to the remote.
 //
 // extraExcludes is matched against either basename or path-relative-to-root.

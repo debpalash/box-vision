@@ -37,14 +37,19 @@ class ShuffleNetV2Backbone(nn.Module):
     """
     ShuffleNetV2 backbone for multi-scale feature extraction.
 
-    Extracts features at 3 scales (strides 8, 16, 32).
+    Default output: [C3, C4, C5] at strides 8/16/32.
+    With expose_p2=True: [C2, C3, C4, C5] at strides 4/8/16/32 (C2 is the
+    stem output — 24 channels for all ShuffleNetV2 variants).
 
     Output channels:
-        0.5x: C3=48,  C4=96,  C5=192
-        1.0x: C3=116, C4=232, C5=464
+        0.5x: C2=24, C3=48,  C4=96,  C5=192
+        1.0x: C2=24, C3=116, C4=232, C5=464
     """
 
-    def __init__(self, variant: str = "shufflenet_v2_x1_0", pretrained: bool = True):
+    STEM_CHANNELS = 24
+
+    def __init__(self, variant: str = "shufflenet_v2_x1_0", pretrained: bool = True,
+                 expose_p2: bool = False):
         super().__init__()
 
         if variant not in _VARIANT_FACTORY:
@@ -69,7 +74,9 @@ class ShuffleNetV2Backbone(nn.Module):
         self.stage3 = shufflenet.stage4  # → C5
         # Skip conv5 (1024ch 1x1 conv) — unnecessary for detection
 
-        self.out_channels_list = list(_VARIANT_CHANNELS[variant])
+        self.expose_p2 = expose_p2
+        base = list(_VARIANT_CHANNELS[variant])
+        self.out_channels_list = ([self.STEM_CHANNELS] + base) if expose_p2 else base
         self.variant = variant
 
     def forward(self, x: torch.Tensor):
@@ -78,12 +85,15 @@ class ShuffleNetV2Backbone(nn.Module):
             x: Input tensor [B, 3, H, W]
 
         Returns:
-            List of feature maps: [C3, C4, C5]
+            [C3, C4, C5]      if expose_p2=False
+            [C2, C3, C4, C5]  if expose_p2=True (C2 at stride 4)
         """
-        x = self.stem(x)
-        c3 = self.stage1(x)
-        c4 = self.stage2(c3)
-        c5 = self.stage3(c4)
+        c2 = self.stem(x)              # stride 4
+        c3 = self.stage1(c2)           # stride 8
+        c4 = self.stage2(c3)           # stride 16
+        c5 = self.stage3(c4)           # stride 32
+        if self.expose_p2:
+            return [c2, c3, c4, c5]
         return [c3, c4, c5]
 
     def get_out_channels(self):

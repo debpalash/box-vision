@@ -129,27 +129,33 @@ class LightFPN(nn.Module):
                  use_ghost: bool = True):
         """
         Args:
-            in_channels_list: Channel counts from backbone [C3_ch, C4_ch, C5_ch]
+            in_channels_list: Channel counts from backbone, len 3 or 4
+                              (3 for [C3,C4,C5], 4 for [C2,C3,C4,C5]).
             out_channels: Unified output channels for all FPN levels
             use_ghost: Use Ghost modules instead of DW-sep convs
         """
         super().__init__()
-        assert len(in_channels_list) == 3
+        assert len(in_channels_list) in (3, 4), (
+            f"FPN expects 3 or 4 input levels, got {len(in_channels_list)}"
+        )
+        self.num_levels = len(in_channels_list)
 
-        # Lateral 1x1 convolutions to project to uniform channels
-        self.lateral_c3 = nn.Conv2d(in_channels_list[0], out_channels, 1)
-        self.lateral_c4 = nn.Conv2d(in_channels_list[1], out_channels, 1)
-        self.lateral_c5 = nn.Conv2d(in_channels_list[2], out_channels, 1)
+        # Lateral 1x1 convolutions per level (ordered low-stride → high-stride)
+        self.laterals = nn.ModuleList([
+            nn.Conv2d(c, out_channels, 1) for c in in_channels_list
+        ])
 
         # Smoothing after fusion
         if use_ghost:
-            self.smooth_p3 = GhostBottleneck(out_channels, out_channels, out_channels)
-            self.smooth_p4 = GhostBottleneck(out_channels, out_channels, out_channels)
-            self.smooth_p5 = GhostBottleneck(out_channels, out_channels, out_channels)
+            self.smooths = nn.ModuleList([
+                GhostBottleneck(out_channels, out_channels, out_channels)
+                for _ in range(self.num_levels)
+            ])
         else:
-            self.smooth_p3 = DepthwiseSeparableConv(out_channels, out_channels)
-            self.smooth_p4 = DepthwiseSeparableConv(out_channels, out_channels)
-            self.smooth_p5 = DepthwiseSeparableConv(out_channels, out_channels)
+            self.smooths = nn.ModuleList([
+                DepthwiseSeparableConv(out_channels, out_channels)
+                for _ in range(self.num_levels)
+            ])
 
         self.out_channels = out_channels
         self._init_weights()
@@ -167,25 +173,23 @@ class LightFPN(nn.Module):
     def forward(self, features: List[torch.Tensor]) -> List[torch.Tensor]:
         """
         Args:
-            features: [C3, C4, C5] from backbone
+            features: [C3, C4, C5] or [C2, C3, C4, C5] from backbone
+                      (ordered low-stride → high-stride)
 
         Returns:
-            [P3, P4, P5] with unified channels
+            Per-level outputs in the same order, all with `out_channels` channels.
         """
-        c3, c4, c5 = features
+        assert len(features) == self.num_levels
 
         # Lateral projections
-        p5 = self.lateral_c5(c5)
-        p4 = self.lateral_c4(c4)
-        p3 = self.lateral_c3(c3)
+        pyramid = [lat(f) for lat, f in zip(self.laterals, features)]
 
-        # Top-down fusion (upsample + add)
-        p4 = p4 + F.interpolate(p5, size=p4.shape[2:], mode="nearest")
-        p3 = p3 + F.interpolate(p4, size=p3.shape[2:], mode="nearest")
+        # Top-down fusion: highest-stride → lowest. Add upsampled coarser level.
+        for i in range(self.num_levels - 1, 0, -1):
+            pyramid[i - 1] = pyramid[i - 1] + F.interpolate(
+                pyramid[i], size=pyramid[i - 1].shape[2:], mode="nearest"
+            )
 
-        # Smooth
-        p5 = self.smooth_p5(p5)
-        p4 = self.smooth_p4(p4)
-        p3 = self.smooth_p3(p3)
-
-        return [p3, p4, p5]
+        # Smooth each level
+        pyramid = [smooth(p) for smooth, p in zip(self.smooths, pyramid)]
+        return pyramid

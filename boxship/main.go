@@ -20,6 +20,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -30,6 +31,9 @@ Usage:
   boxship run <command...>
   boxship run --pty <command...>      # allocate a PTY (nicer tqdm output)
   boxship upload <local> <remote> [--exclude=pat,pat]
+  boxship wait <remote-log> [--marker=STR] [--poll=SEC] [--timeout=SEC]
+                                       # block until marker appears in log
+                                       # default marker: "Training complete"
 
 Env:
   BOXSHIP_HOST       remote hostname/IP        (required)
@@ -90,6 +94,36 @@ func main() {
 			}
 		}
 		exit(cmdUpload(client, local, remote, extra))
+
+	case "wait":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "boxship: wait requires <remote-log-path>")
+			os.Exit(2)
+		}
+		logPath := rest[0]
+		marker := "Training complete"
+		poll := 30
+		timeout := 0
+		tail := 40
+		for _, arg := range rest[1:] {
+			switch {
+			case strings.HasPrefix(arg, "--marker="):
+				marker = strings.TrimPrefix(arg, "--marker=")
+			case strings.HasPrefix(arg, "--poll="):
+				if n, err := strconv.Atoi(strings.TrimPrefix(arg, "--poll=")); err == nil {
+					poll = n
+				}
+			case strings.HasPrefix(arg, "--timeout="):
+				if n, err := strconv.Atoi(strings.TrimPrefix(arg, "--timeout=")); err == nil {
+					timeout = n
+				}
+			case strings.HasPrefix(arg, "--tail="):
+				if n, err := strconv.Atoi(strings.TrimPrefix(arg, "--tail=")); err == nil {
+					tail = n
+				}
+			}
+		}
+		exit(cmdWait(client, logPath, marker, poll, timeout, tail))
 
 	case "-h", "--help", "help":
 		fmt.Print(usage)

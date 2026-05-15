@@ -29,9 +29,15 @@ class BoxVision(nn.Module):
         super().__init__()
         self.config = config or ModelConfig()
 
+        # If P2 is requested, prepend stride 4 to the strides list and ask the
+        # backbone to expose its stem features.
+        if self.config.use_p2 and self.config.strides[0] != 4:
+            self.config.strides = [4] + list(self.config.strides)
+
         self.backbone = ShuffleNetV2Backbone(
             variant=self.config.backbone,
             pretrained=self.config.pretrained_backbone,
+            expose_p2=self.config.use_p2,
         )
 
         self.fpn = LightFPN(
@@ -51,9 +57,11 @@ class BoxVision(nn.Module):
 
         self.strides = self.config.strides
         self._grids_built = False
+        self._grids_for_hw: Tuple[int, int] = (-1, -1)
 
     def _build_grids(self, input_h: int, input_w: int, device: torch.device):
-        """Pre-compute grid center points for each FPN level. Call once."""
+        """Pre-compute grid center points for each FPN level. Rebuilds when
+        input size changes (needed for multi-scale + TTA / BoxScout)."""
         self._grid_points = []
         for stride in self.strides:
             h = input_h // stride
@@ -64,6 +72,7 @@ class BoxVision(nn.Module):
             points = torch.stack([x_grid, y_grid], dim=-1).reshape(-1, 2)
             self._grid_points.append(points)
         self._grids_built = True
+        self._grids_for_hw = (input_h, input_w)
 
     def forward(self, x: torch.Tensor):
         """Raw head outputs only — ONNX-traceable. Same return shape in train and eval.
@@ -118,8 +127,17 @@ class BoxVision(nn.Module):
         device = objectness[0].device
         H, W = image_size
 
-        if not self._grids_built:
-            self._build_grids(H, W, device)
+        # Build grids from actual feature-map sizes (the head output) instead of
+        # input/stride division — handles edge cases (padding, odd input sizes)
+        # cleanly and is required for TTA / multi-scale / BoxScout where input
+        # size varies between calls.
+        grid_points: list[torch.Tensor] = []
+        for level_idx, stride in enumerate(self.strides):
+            _, _, gh, gw = objectness[level_idx].shape
+            xr = torch.arange(0, gw, device=device).float() * stride + stride // 2
+            yr = torch.arange(0, gh, device=device).float() * stride + stride // 2
+            yg, xg = torch.meshgrid(yr, xr, indexing="ij")
+            grid_points.append(torch.stack([xg, yg], dim=-1).reshape(-1, 2))
 
         batch_size = objectness[0].shape[0]
         batch_boxes = []
@@ -134,7 +152,7 @@ class BoxVision(nn.Module):
             for level_idx in range(len(self.strides)):
                 obj = objectness[level_idx][b, 0]
                 bbox = bbox_reg[level_idx][b]
-                points = self._grid_points[level_idx].to(device)
+                points = grid_points[level_idx]
 
                 obj_flat = obj.reshape(-1)
                 bbox_flat = bbox.permute(1, 2, 0).reshape(-1, 4)
@@ -214,14 +232,40 @@ class BoxVision(nn.Module):
             scores = scores[keep]
             labels = labels[keep]
 
-            keep_nms = ops.batched_nms(boxes, scores, labels, self.config.nms_threshold)
-            if len(keep_nms) > self.config.max_detections:
-                keep_nms = keep_nms[:self.config.max_detections]
+            if self.config.use_wbf:
+                # Weighted Boxes Fusion — cluster overlapping boxes and emit
+                # one score-weighted average per cluster. Better-localized
+                # boxes than NMS picks; preserves info for mAP.
+                boxes_n, scores_n, labels_n = _weighted_box_fusion(
+                    boxes, scores, labels,
+                    iou_threshold=self.config.wbf_iou_threshold,
+                )
+                if boxes_n.shape[0] > self.config.max_detections:
+                    order = torch.argsort(scores_n, descending=True)[: self.config.max_detections]
+                    boxes_n, scores_n, labels_n = boxes_n[order], scores_n[order], labels_n[order]
+            else:
+                keep_nms = ops.batched_nms(boxes, scores, labels, self.config.nms_threshold)
+                if len(keep_nms) > self.config.max_detections:
+                    keep_nms = keep_nms[:self.config.max_detections]
+                boxes_n = boxes[keep_nms]
+                scores_n = scores[keep_nms]
+                labels_n = labels[keep_nms]
+
+            # Optional containment suppression for clean visual output:
+            # drop a smaller box when it's >threshold contained inside any
+            # higher-scoring box. Off by default (threshold = 0) because it
+            # costs ~10 mAP@0.5:0.95 by removing near-miss boxes the COCO
+            # eval would count as TPs at higher IoU thresholds.
+            if self.config.containment_threshold > 0:
+                boxes_n, scores_n, labels_n = _suppress_contained(
+                    boxes_n, scores_n, labels_n,
+                    threshold=self.config.containment_threshold,
+                )
 
             results.append({
-                "boxes": boxes[keep_nms],
-                "scores": scores[keep_nms],
-                "labels": labels[keep_nms],
+                "boxes": boxes_n,
+                "scores": scores_n,
+                "labels": labels_n,
             })
 
         return results
@@ -234,6 +278,106 @@ class BoxVision(nn.Module):
             "trainable": trainable,
             "total_mb": total * 4 / (1024 * 1024),
         }
+
+
+def _weighted_box_fusion(boxes: torch.Tensor, scores: torch.Tensor, labels: torch.Tensor,
+                           iou_threshold: float = 0.55) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Weighted Boxes Fusion (Solovyev et al.) — class-aware.
+
+    Clusters overlapping same-class boxes. For each cluster, output a single
+    box whose coordinates are the score-weighted mean of cluster members
+    (better-localized than any individual member) with summed-then-renormalized
+    score.
+
+    Compared to NMS this preserves "near-miss" contributions: a slightly off
+    second prediction nudges the merged box toward the consensus rather than
+    being discarded.
+    """
+    n = boxes.shape[0]
+    if n == 0:
+        return boxes, scores, labels
+    device = boxes.device
+    order = torch.argsort(scores, descending=True)
+    boxes = boxes[order]
+    scores = scores[order]
+    labels = labels[order]
+
+    # ious[i, j] for i <= j
+    ious = ops.box_iou(boxes, boxes)
+
+    clusters: List[List[int]] = []
+    used = torch.zeros(n, dtype=torch.bool, device=device)
+    for i in range(n):
+        if used[i]:
+            continue
+        members = [i]
+        used[i] = True
+        for j in range(i + 1, n):
+            if used[j]:
+                continue
+            if labels[j] != labels[i]:
+                continue
+            if ious[i, j] >= iou_threshold:
+                members.append(j)
+                used[j] = True
+        clusters.append(members)
+
+    out_boxes = []
+    out_scores = []
+    out_labels = []
+    for mem in clusters:
+        idx = torch.tensor(mem, dtype=torch.long, device=device)
+        w = scores[idx]
+        b = boxes[idx]
+        wsum = w.sum().clamp(min=1e-7)
+        merged = (b * w.unsqueeze(1)).sum(dim=0) / wsum
+        out_boxes.append(merged)
+        # Fused score = mean of members, then scaled by sqrt(cluster size /
+        # max possible cluster size) to slightly reward consensus.
+        out_scores.append(w.mean())
+        out_labels.append(labels[idx[0]])
+
+    return (torch.stack(out_boxes),
+            torch.stack(out_scores),
+            torch.stack(out_labels))
+
+
+def _suppress_contained(boxes: torch.Tensor, scores: torch.Tensor, labels: torch.Tensor,
+                          threshold: float = 0.4) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Drop a smaller box whose area is >threshold contained within a higher-scoring one.
+
+    Catches the "tight inner + loose outer" duplicate case where IoU is too low
+    (size mismatch tanks union ratio) but the smaller box is visually a subset
+    of the larger.
+    """
+    n = boxes.shape[0]
+    if n <= 1:
+        return boxes, scores, labels
+    order = torch.argsort(scores, descending=True)
+    keep = torch.ones(n, dtype=torch.bool, device=boxes.device)
+    sorted_boxes = boxes[order]
+    sorted_areas = (sorted_boxes[:, 2] - sorted_boxes[:, 0]) * (sorted_boxes[:, 3] - sorted_boxes[:, 1])
+    for i in range(n):
+        if not keep[order[i]]:
+            continue
+        bi = sorted_boxes[i]
+        for j in range(i + 1, n):
+            if not keep[order[j]]:
+                continue
+            bj = sorted_boxes[j]
+            ix1 = torch.maximum(bi[0], bj[0])
+            iy1 = torch.maximum(bi[1], bj[1])
+            ix2 = torch.minimum(bi[2], bj[2])
+            iy2 = torch.minimum(bi[3], bj[3])
+            iw = (ix2 - ix1).clamp(min=0)
+            ih = (iy2 - iy1).clamp(min=0)
+            inter = iw * ih
+            min_area = torch.minimum(sorted_areas[i], sorted_areas[j])
+            if min_area <= 0:
+                continue
+            if (inter / min_area) > threshold:
+                keep[order[j]] = False
+    return boxes[keep], scores[keep], labels[keep]
 
 
 class ModelEMA:

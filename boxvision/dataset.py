@@ -47,6 +47,10 @@ class BoxDataset(Dataset):
         is_training: bool = True,
         mosaic: bool = False,
         class_agnostic: bool = True,
+        mixup: bool = False,
+        mixup_prob: float = 0.15,
+        copy_paste: bool = False,
+        copy_paste_prob: float = 0.3,
     ):
         """
         Args:
@@ -64,6 +68,12 @@ class BoxDataset(Dataset):
         self.is_training = is_training
         self.mosaic = mosaic and is_training  # Only during training
         self.class_agnostic = class_agnostic
+        # Extra augmentations (training only). Applied AFTER the main mosaic/
+        # standard transform pipeline, on the final normalized tensors.
+        self.mixup = mixup and is_training
+        self.mixup_prob = mixup_prob
+        self.copy_paste = copy_paste and is_training
+        self.copy_paste_prob = copy_paste_prob
 
         # Load COCO annotations
         with open(annotation_file, "r") as f:
@@ -301,6 +311,61 @@ class BoxDataset(Dataset):
             labels:   [N] long tensor of class indices (all zeros if class_agnostic)
             image_id: original COCO image ID
         """
+        sample = self._load_one_sample(idx)
+
+        if self.mixup and random.random() < self.mixup_prob:
+            partner = self._load_one_sample(random.randint(0, len(self) - 1))
+            sample = self._apply_mixup(sample, partner)
+
+        if self.copy_paste and random.random() < self.copy_paste_prob:
+            partner = self._load_one_sample(random.randint(0, len(self) - 1))
+            sample = self._apply_copy_paste(sample, partner)
+
+        return sample
+
+    def _apply_mixup(self, s1: dict, s2: dict) -> dict:
+        """Linear blend of two image tensors; concat boxes/labels.
+
+        We sample α from a Beta distribution centered around 0.5 (matching the
+        standard mixup recipe). Boxes carry over unmodified because both images
+        have the same letterboxed dimensions.
+        """
+        alpha = float(np.random.beta(8.0, 8.0))  # tighter around 0.5
+        s1["image"] = s1["image"] * alpha + s2["image"] * (1.0 - alpha)
+        if s2["boxes"].numel() > 0:
+            s1["boxes"] = torch.cat([s1["boxes"], s2["boxes"]], dim=0)
+            s1["labels"] = torch.cat([s1["labels"], s2["labels"]], dim=0)
+        return s1
+
+    def _apply_copy_paste(self, s1: dict, s2: dict) -> dict:
+        """Copy up to 3 box-cropped pixel regions from s2 into s1 in-place."""
+        if s2["boxes"].numel() == 0:
+            return s1
+        n_objs = s2["boxes"].shape[0]
+        n_take = min(3, n_objs)
+        pick = torch.randperm(n_objs)[:n_take]
+        new_boxes = s2["boxes"][pick]
+        new_labels = s2["labels"][pick]
+        H, W = s1["image"].shape[1:]
+        added_boxes = []
+        added_labels = []
+        for i, box in enumerate(new_boxes):
+            x1, y1, x2, y2 = box.tolist()
+            xi1, yi1, xi2, yi2 = int(x1), int(y1), int(x2), int(y2)
+            xi1, yi1 = max(0, xi1), max(0, yi1)
+            xi2, yi2 = min(W, xi2), min(H, yi2)
+            if xi2 - xi1 < 2 or yi2 - yi1 < 2:
+                continue
+            s1["image"][:, yi1:yi2, xi1:xi2] = s2["image"][:, yi1:yi2, xi1:xi2]
+            added_boxes.append(torch.tensor([xi1, yi1, xi2, yi2], dtype=torch.float32))
+            added_labels.append(new_labels[i])
+        if added_boxes:
+            s1["boxes"] = torch.cat([s1["boxes"], torch.stack(added_boxes)], dim=0)
+            s1["labels"] = torch.cat([s1["labels"], torch.stack(added_labels)], dim=0)
+        return s1
+
+    def _load_one_sample(self, idx: int) -> dict:
+        """Produce one normalized sample via the mosaic/standard pipeline."""
         if self.mosaic and random.random() < 0.8:
             # Mosaic: 80% probability during training
             image, boxes, labels = self._mosaic_4(idx)
@@ -342,6 +407,15 @@ class BoxDataset(Dataset):
         """Toggle mosaic on/off (for late-epoch disabling)."""
         self.mosaic = enabled and self.is_training
 
+    def set_input_size(self, input_size: Tuple[int, int]):
+        """Resize the augmentation pipeline to a new (H, W). Used for multi-scale training."""
+        self.input_size = input_size
+        # Rebuild only the transforms that depend on input size
+        if self.is_training:
+            self.transforms = self._train_transforms()
+        else:
+            self.transforms = self._val_transforms()
+
 
 def collate_fn(batch: List[dict]) -> dict:
     """
@@ -373,6 +447,8 @@ def build_dataloader(
     transforms: Optional[Callable] = None,
     mosaic: bool = False,
     class_agnostic: bool = True,
+    mixup: bool = False,
+    copy_paste: bool = False,
 ) -> DataLoader:
     """Factory function to create a DataLoader."""
     dataset = BoxDataset(
@@ -383,6 +459,8 @@ def build_dataloader(
         is_training=is_training,
         mosaic=mosaic,
         class_agnostic=class_agnostic,
+        mixup=mixup,
+        copy_paste=copy_paste,
     )
 
     return DataLoader(

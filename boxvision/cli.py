@@ -20,20 +20,19 @@ def cmd_train(args):
     from .config import ModelConfig, TrainConfig, tiny_config, small_config
     from .train import Trainer
 
+    model_overrides = dict(
+        input_size=(args.input_size, args.input_size),
+        pretrained_backbone=True,
+        use_p2=args.use_p2,
+    )
     if args.preset == "tiny":
-        model_config = tiny_config(
-            input_size=(args.input_size, args.input_size),
-            pretrained_backbone=True,
-        )
+        model_config = tiny_config(**model_overrides)
     elif args.preset == "small":
-        model_config = small_config(
-            input_size=(args.input_size, args.input_size),
-            pretrained_backbone=True,
-        )
+        model_config = small_config(**model_overrides)
     else:
         model_config = ModelConfig(
-            input_size=(args.input_size, args.input_size),
             fpn_out_channels=args.fpn_channels,
+            **model_overrides,
         )
 
     train_config = TrainConfig(
@@ -46,6 +45,9 @@ def cmd_train(args):
         device=args.device,
         eval_interval=args.eval_interval,
         save_interval=args.save_interval,
+        multiscale=args.multiscale,
+        mixup=args.mixup,
+        copy_paste=args.copy_paste,
     )
 
     trainer = Trainer(model_config, train_config)
@@ -199,6 +201,14 @@ def main():
     train_parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     train_parser.add_argument("--input-size", type=int, default=320, help="Input image size")
     train_parser.add_argument("--fpn-channels", type=int, default=48, help="FPN output channels")
+    train_parser.add_argument("--use-p2", action="store_true",
+                              help="Add stride-4 FPN level for small-object detection")
+    train_parser.add_argument("--multiscale", action="store_true",
+                              help="Random input size per epoch (320/416/512)")
+    train_parser.add_argument("--mixup", action="store_true",
+                              help="Mixup augmentation (alpha-blend pairs of images)")
+    train_parser.add_argument("--copy-paste", action="store_true",
+                              help="Copy-paste augmentation (paste boxes from partner images)")
     train_parser.add_argument("--workers", type=int, default=4, help="Data loader workers")
     train_parser.add_argument("--save-dir", type=str, default="./runs", help="Checkpoint save directory")
     train_parser.add_argument("--device", type=str, default="cpu", help="Device (cpu or cuda)")

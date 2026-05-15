@@ -129,12 +129,29 @@ class TaskAlignedAssigner:
     alignment_metric = objectness^alpha * iou^beta
     """
 
+    # FCOS-style per-FPN-level size ranges (max box dimension).
+    # An overlapping schedule (a box can train two adjacent levels) is more
+    # forgiving than a hard cut and gives stronger training signal.
+    DEFAULT_STRIDE_RANGES = {
+        4:  (0,   64),
+        8:  (32,  128),
+        16: (64,  256),
+        32: (128, 1e6),
+    }
+
     def __init__(self, topk: int = 10, alpha: float = 0.5, beta: float = 6.0,
-                 use_soft_labels: bool = True):
+                 use_soft_labels: bool = True,
+                 # FCOS-style per-FPN-level matching helped mAP@0.5 (+1.1) but
+                 # hurt strict-IoU mAP (-14.5) and visual quality on the small
+                 # shapes dataset. Kept in code as opt-in; default is off.
+                 use_level_matching: bool = False,
+                 stride_ranges: Optional[dict] = None):
         self.topk = topk
         self.alpha = alpha
         self.beta = beta
         self.use_soft_labels = use_soft_labels
+        self.use_level_matching = use_level_matching
+        self.stride_ranges = stride_ranges or self.DEFAULT_STRIDE_RANGES
 
     @torch.no_grad()
     def assign(
@@ -143,6 +160,7 @@ class TaskAlignedAssigner:
         pred_boxes: torch.Tensor,     # [num_points, 4] predicted boxes (xyxy)
         gt_boxes: torch.Tensor,       # [num_gt, 4] ground truth boxes (xyxy)
         points: torch.Tensor,         # [num_points, 2] grid center points (x, y)
+        point_strides: Optional[torch.Tensor] = None,  # [num_points] stride per point
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Assign GT boxes to prediction points using task-aligned metric.
@@ -174,6 +192,22 @@ class TaskAlignedAssigner:
         gt_y2 = gt_boxes[:, 3:4].T
 
         inside_mask = (px >= gt_x1) & (px <= gt_x2) & (py >= gt_y1) & (py <= gt_y2)  # [N, M]
+
+        # 1b. Per-FPN-level size matching: only let appropriate levels claim
+        # each GT based on the GT's max(w, h). Skipped if no stride info is
+        # provided or feature is disabled.
+        if self.use_level_matching and point_strides is not None:
+            gt_w = gt_boxes[:, 2] - gt_boxes[:, 0]
+            gt_h = gt_boxes[:, 3] - gt_boxes[:, 1]
+            gt_size = torch.maximum(gt_w, gt_h)  # [M]
+            # Build a [N, M] mask: True if point's stride covers this GT's size.
+            level_mask = torch.zeros_like(inside_mask)
+            for stride, (lo, hi) in self.stride_ranges.items():
+                level_pts = (point_strides == stride)
+                # mask[N, M] for this stride: True where GT fits in [lo, hi]
+                fits = (gt_size >= lo) & (gt_size < hi)
+                level_mask |= level_pts[:, None] & fits[None, :]
+            inside_mask = inside_mask & level_mask
 
         # 2. Compute alignment metric
         iou = _compute_iou(pred_boxes, gt_boxes)  # [N, M]
@@ -308,6 +342,7 @@ class BoxVisionLoss(nn.Module):
             all_obj = []
             all_bbox = []
             all_points = []
+            all_strides = []
             all_class = [] if multi_class else None
 
             for level_idx in range(num_levels):
@@ -323,6 +358,8 @@ class BoxVisionLoss(nn.Module):
                 all_obj.append(obj_flat)
                 all_bbox.append((bbox_flat, points, stride))
                 all_points.append(points)
+                all_strides.append(torch.full((points.shape[0],), stride,
+                                              dtype=torch.long, device=device))
 
                 if multi_class:
                     # [C, H, W] → [H*W, C]
@@ -332,6 +369,7 @@ class BoxVisionLoss(nn.Module):
             # Concatenate across levels
             cat_obj = torch.cat([o for o in all_obj], dim=0)
             cat_points = torch.cat(all_points, dim=0)
+            cat_strides = torch.cat(all_strides, dim=0)
             cat_class = torch.cat(all_class, dim=0) if multi_class else None
 
             # Decode bbox predictions to xyxy
@@ -346,7 +384,8 @@ class BoxVisionLoss(nn.Module):
             obj_scores = torch.sigmoid(cat_obj)
 
             labels, bbox_targets, assign_metrics, assigned_gt = self.assigner.assign(
-                obj_scores, cat_bbox_decoded, gt_boxes, cat_points
+                obj_scores, cat_bbox_decoded, gt_boxes, cat_points,
+                point_strides=cat_strides,
             )
 
             # Objectness loss (all points)

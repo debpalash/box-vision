@@ -168,6 +168,8 @@ class Trainer:
             is_training=True,
             mosaic=self.train_config.mosaic,
             class_agnostic=spec.class_agnostic,
+            mixup=getattr(self.train_config, "mixup", False),
+            copy_paste=getattr(self.train_config, "copy_paste", False),
         )
 
         self.val_loader = build_dataloader(
@@ -343,6 +345,7 @@ class Trainer:
         # If mosaic_off_epochs >= total epochs, mosaic would never be on.
         effective_off = min(self.train_config.mosaic_off_epochs, self.train_config.epochs // 2)
 
+        import random as _random
         for epoch in range(self.start_epoch, self.train_config.epochs):
             # Mosaic scheduling: disable for last N epochs
             if self.train_config.mosaic:
@@ -351,6 +354,15 @@ class Trainer:
                 self.train_loader.dataset.set_mosaic(mosaic_on)
                 if not mosaic_on and remaining == effective_off:
                     print(f"  Mosaic OFF for final {effective_off} epochs")
+
+            # Multi-scale training: pick a random input size for this epoch.
+            # Val loader stays at model_config.input_size for stable mAP eval.
+            if self.train_config.multiscale and self.train_config.multiscale_sizes:
+                size = _random.choice(self.train_config.multiscale_sizes)
+                ds = self.train_loader.dataset
+                if isinstance(getattr(ds, "input_size", None), tuple) and ds.input_size != (size, size):
+                    ds.set_input_size((size, size))
+                    print(f"  [multiscale] epoch {epoch+1}: input {size}x{size}")
 
             train_metrics = self.train_one_epoch(epoch)
 

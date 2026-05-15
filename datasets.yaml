@@ -54,6 +54,21 @@ road-signs-multiclass:
       images: test
       annotations: test/_annotations.coco.json
 
+shapes:
+  format: coco
+  root: datasets/shapes
+  class_agnostic: true
+  description: Label Studio export (project-615) — arrow/box/line shapes collapsed to single "object" class for class-agnostic detection
+  license: (user-provided)
+  source: Label Studio project-615
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 road-signs-yolo:
   format: yolo
   root: datasets/yolo26
