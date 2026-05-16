@@ -170,3 +170,22 @@ The speed/accuracy trade-off is intentional. We're not trying to match YOLO26n
 accuracy — we're targeting the use case where box detection speed on CPU
 matters more than a few mAP points. The Tiny tier is for edge/IoT workloads
 that need millisecond-scale inference at the cost of ~13 mAP relative to Pro.
+
+## Cross-Dataset Validation (road-signs)
+
+To confirm the KD recipe transfers, we ran it end-to-end on Roboflow
+road-signs (1376 train / 488 val, single class):
+
+| Model | params | input | mAP@0.5 | latency |
+|---|---|---|---|---|
+| Teacher (small+P2+aug) | 842K | 416 | 56.22% | — |
+| **Tiny KD FP32** | **164K** | **320** | **79.07%** | **4.14ms** |
+| Tiny KD INT8 | 164K | 320 | 77.98% | 4.16ms |
+
+The student decisively **outperforms its own teacher** here (+22.8 mAP). The
+teacher's heavy mosaic+mixup+copy-paste recipe over-regularizes the
+larger-object road-signs distribution, while the student's light-aug
+recipe + the modest pseudo-label signal (~+18% extra boxes) lands in a
+better basin. Worth keeping in mind: teacher hyperparams matter more than
+absolute teacher mAP — a "good enough" teacher with sparse, high-precision
+pseudo-labels can still drive a strong student.

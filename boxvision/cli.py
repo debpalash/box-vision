@@ -224,7 +224,8 @@ def main():
     export_parser = subparsers.add_parser("export", help="Export to ONNX")
     export_parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
     export_parser.add_argument("--output", type=str, default="./boxvision_model.onnx", help="Output ONNX path")
-    export_parser.add_argument("--input-size", type=int, default=320, help="Input size")
+    export_parser.add_argument("--input-size", type=int, default=None,
+                               help="Input size (default: use checkpoint's saved input_size)")
     export_parser.add_argument("--quantize", action="store_true", help="Apply INT8 quantization")
 
     # --- Detect ---

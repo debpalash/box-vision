@@ -84,6 +84,21 @@ shapes-distilled:
       images: valid
       annotations: valid/_annotations.coco.json
 
+road-signs-distilled:
+  format: coco
+  root: datasets/road-signs-distilled
+  class_agnostic: true
+  description: road-signs train split augmented with rs-teacher-416 pseudo-labels (~+18% extra boxes); valid mirrors road-signs valid for apples-to-apples eval
+  license: CC BY 4.0
+  source: distill_pseudo_labels.py from runs/rs-teacher-416-200ep/best.pt (conf=0.40, iou-with-gt=0.5)
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 road-signs-yolo:
   format: yolo
   root: datasets/yolo26
