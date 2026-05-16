@@ -36,9 +36,11 @@ class Variant:
 
 
 VARIANTS = [
-    Variant("Pro  (G FP32 @ 416)",  "runs/G-aug-300ep/boxvision-G.onnx",          416, (0, 200, 0)),
-    Variant("Fast (G FP32 @ 320)",  "runs/G-aug-300ep/boxvision-G-320.onnx",      320, (255, 100, 0)),
-    Variant("INT8 (G INT8 @ 320)",  "runs/G-aug-300ep/boxvision-G-320-int8.onnx", 320, (0, 100, 255)),
+    Variant("Pro  (G FP32 @ 416)",       "runs/G-aug-300ep/boxvision-G.onnx",                       416, (0, 200, 0)),
+    Variant("Fast (G FP32 @ 320)",       "runs/G-aug-300ep/boxvision-G-320.onnx",                   320, (255, 100, 0)),
+    Variant("Tiny (KD FP32 @ 320)",      "runs/tiny-p2-light-200ep/boxvision-tiny-p2.onnx",         320, (255, 0, 200)),
+    Variant("TinyQ (KD INT8 @ 320)",     "runs/tiny-p2-light-200ep/boxvision-tiny-p2-int8.onnx",    320, (0, 200, 200)),
+    Variant("INT8 (G INT8 @ 320)",       "runs/G-aug-300ep/boxvision-G-320-int8.onnx",              320, (0, 100, 255)),
 ]
 
 
@@ -143,9 +145,9 @@ def main():
     for v in VARIANTS:
         predict(sessions[v.name], dummy, v.input_size, args.conf)
 
-    print(f"{'Image':<60} {'Pro detections':>18} {'Fast detections':>18} {'INT8 detections':>18}")
-    print(f"{'':<60} {'mAP-anchor':>18} {'2.5×':>18} {'4.3× (low mAP)':>18}")
-    print("-" * 132)
+    headers = [v.name for v in VARIANTS]
+    print(f"{'Image':<55} " + " ".join(f"{h:>18}" for h in headers))
+    print("-" * (55 + (19 * len(VARIANTS))))
 
     per_variant_times = {v.name: [] for v in VARIANTS}
 
@@ -166,10 +168,8 @@ def main():
             results[v.name] = (boxes, scores, avg)
             per_variant_times[v.name].append(avg)
 
-        print(f"{img_path.name:<60} "
-              f"{f'{results[VARIANTS[0].name][0].shape[0]} ({results[VARIANTS[0].name][2]:.1f}ms)':>18} "
-              f"{f'{results[VARIANTS[1].name][0].shape[0]} ({results[VARIANTS[1].name][2]:.1f}ms)':>18} "
-              f"{f'{results[VARIANTS[2].name][0].shape[0]} ({results[VARIANTS[2].name][2]:.1f}ms)':>18}")
+        cells = [f"{results[v.name][0].shape[0]} ({results[v.name][2]:.1f}ms)" for v in VARIANTS]
+        print(f"{img_path.name:<55} " + " ".join(f"{c:>18}" for c in cells))
 
         # Draw side-by-side panels
         panels = []
@@ -197,9 +197,11 @@ def main():
     print(f"{'Summary':<24} {'mAP@0.5':>10} {'avg ms':>10} {'vs YOLO26n':>12}")
     yolo_ms = 38.9
     map_lookup = {
-        "Pro  (G FP32 @ 416)":  87.30,
-        "Fast (G FP32 @ 320)":  86.48,
-        "INT8 (G INT8 @ 320)":  79.05,
+        "Pro  (G FP32 @ 416)":   87.30,
+        "Fast (G FP32 @ 320)":   86.48,
+        "Tiny (KD FP32 @ 320)":  74.48,
+        "TinyQ (KD INT8 @ 320)": 71.82,
+        "INT8 (G INT8 @ 320)":   79.05,
     }
     for v in VARIANTS:
         avg_ms = sum(per_variant_times[v.name]) / max(len(per_variant_times[v.name]), 1)
