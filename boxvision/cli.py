@@ -76,25 +76,29 @@ def cmd_datasets(args):
 
 
 def cmd_export(args):
-    """Export model to ONNX."""
-    from .config import ModelConfig, ExportConfig
+    """Export model to ONNX. Reads architecture from the checkpoint's saved
+    model_config so tiny/small/p2 variants all work without flags."""
+    import torch
+    from .config import ExportConfig
     from .model import build_model
     from .export import BoxVisionONNXExporter
 
-    model_config = ModelConfig(
-        pretrained_backbone=False,
-        input_size=(args.input_size, args.input_size),
-    )
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    model_config = ckpt["model_config"]
+    model_config.pretrained_backbone = False  # weights come from the checkpoint
+    if args.input_size:
+        model_config.input_size = (args.input_size, args.input_size)
+    input_size = model_config.input_size
+
+    model = build_model(model_config)
+    model.load_state_dict(ckpt.get("ema_state_dict") or ckpt["model_state_dict"])
 
     export_config = ExportConfig(
         output_path=args.output,
         quantize_int8=args.quantize,
-        input_size=(args.input_size, args.input_size),
+        input_size=input_size,
     )
-
-    model = build_model(model_config)
-    exporter = BoxVisionONNXExporter(model, export_config)
-    exporter.export(checkpoint_path=args.checkpoint)
+    BoxVisionONNXExporter(model, export_config).export()
 
 
 def cmd_detect(args):

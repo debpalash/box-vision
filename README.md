@@ -3,21 +3,25 @@
 **Lightweight, CPU-optimized, class-agnostic bounding box detector.**  
 Purpose-built for workloads that only need to detect *where* objects are — no classification.
 
-## Two Presets
+## Three Shipping Tiers
 
-| | BoxVision-tiny | BoxVision-small | YOLO26n |
-|---|---|---|---|
-| **Backbone** | ShuffleNetV2-0.5x | ShuffleNetV2-1.0x | C3k2 + C2PSA |
-| **Neck** | FPN (32ch) | Ghost-FPN (48ch) | PAN-FPN |
-| **Parameters** | **162K** | **838K** | 2,572K |
-| **Size (FP32)** | **0.62 MB** | **3.20 MB** | ~10 MB |
-| **CPU @ 320** | **~13ms / 77 FPS** | **~24ms / 41 FPS** | N/A |
-| **CPU @ 640** | ~25ms | ~50ms | ~39ms (ONNX) |
-| **Use case** | Ultra-fast, edge/IoT | Balanced speed/accuracy | Multi-class general |
+Measured on shapes (567-image dataset, 141-image val), Mac M1 CPU, ONNX Runtime:
 
-> **Note**: Our numbers are PyTorch on Apple Silicon CPU. YOLO26n is
-> ONNX-optimized on EC2 P4d CPU. Not apples-to-apples until we
-> benchmark both as ONNX on the same hardware.
+| Tier | Backbone | params | input | mAP@0.5 | latency | use case |
+|---|---|---|---|---|---|---|
+| **Pro** | small + P2 | 500K | 416 | **87.30%** | 15.9ms | best accuracy |
+| **Fast** | small + P2 | 500K | 320 | 86.48% | 10.2ms | balanced |
+| **Tiny KD** | tiny + P2 (distilled) | **164K** | 320 | 74.48% | **5.8ms** | edge/IoT speed |
+| **Tiny KD INT8** | tiny + P2 (distilled, PTQ) | 164K | 320 | 71.82% | **4.7ms** | smallest deploy |
+
+The Tiny tier is the output of offline knowledge distillation: a `small+P2`
+teacher labels the training set, and the student trains on real GT + teacher
+pseudo-labels (~+48% extra training signal). The recipe gives Tiny **86% of
+the teacher's mAP at 33% of the parameters and 1.8× the speed**.
+
+> Tier names map to shipping ONNX files: `boxvision-G.onnx` (Pro),
+> `boxvision-G-320.onnx` (Fast), `boxvision-tiny-p2.onnx` (Tiny),
+> `boxvision-tiny-p2-int8.onnx` (Tiny INT8).
 
 ## Architecture
 
@@ -69,18 +73,35 @@ Input (320×320 default)
 uv sync
 ```
 
-### Train (default: small preset)
+### Train
 
 ```bash
+# Pro / Fast — small backbone with P2 (stride-4) head
 uv run python -m boxvision.cli train \
-    --preset small \
-    --data ./data \
-    --epochs 100
+    --preset small --use-p2 --input-size 416 \
+    --dataset shapes --epochs 300
 
-# Or use tiny preset for extreme speed
+# Tiny — same idea, smaller backbone
 uv run python -m boxvision.cli train \
-    --preset tiny \
-    --data ./data
+    --preset tiny --use-p2 --input-size 320 \
+    --dataset shapes --epochs 200
+```
+
+### Train Tiny via knowledge distillation (recommended for the Tiny tier)
+
+```bash
+# 1. Use a Pro/Fast checkpoint to label the training set with pseudo-boxes
+uv run python scripts/distill_pseudo_labels.py \
+    --teacher runs/pro/best.pt \
+    --dataset shapes \
+    --out datasets/shapes-distilled \
+    --conf 0.40
+
+# 2. Register the distilled dataset in datasets.yaml (see existing entries),
+#    then train the tiny student with --use-p2 and lighter augmentation
+uv run python scripts/train_kd_student.py \
+    --tag tiny-kd-200ep --dataset shapes-distilled \
+    --epochs 200 --use-p2 --light-aug
 ```
 
 ### Export to ONNX
@@ -142,15 +163,10 @@ boxvision/
 
 ## Realistic Expectations
 
-Based on NanoDet-Plus benchmarks (same backbone family):
-
-| Config | Est. mAP@50:95 | Notes |
-|---|---|---|
-| BoxVision-tiny @ 320 | ~15-20 | Very constrained (162K params) |
-| BoxVision-small @ 320 | ~25-28 | Matches NanoDet-Plus tier |
-| BoxVision-small @ 416 | ~27-30 | Better for larger objects |
-| YOLO26n @ 640 | ~40.9 | 80-class, 3x more params |
+Numbers above are on shapes (567 train / 141 val). Measured mAP@0.5:0.95
+on the same set: Pro 49.6%, Fast 49.2%, Tiny KD 34.6%, Tiny KD INT8 31.2%.
 
 The speed/accuracy trade-off is intentional. We're not trying to match YOLO26n
 accuracy — we're targeting the use case where box detection speed on CPU
-matters more than a few mAP points.
+matters more than a few mAP points. The Tiny tier is for edge/IoT workloads
+that need millisecond-scale inference at the cost of ~13 mAP relative to Pro.
