@@ -30,9 +30,11 @@ class Variant:
 
 
 VARIANTS = [
-    Variant("Teacher (small+P2 @ 416)",  "runs/rs-teacher-416-200ep/boxvision-rs-teacher.onnx", 416, (0, 200, 0)),
-    Variant("Tiny KD (FP32 @ 320)",      "runs/rs-tiny-kd-200ep/boxvision-rs-tiny-p2.onnx",      320, (255, 100, 0)),
-    Variant("Tiny KD (INT8 @ 320)",      "runs/rs-tiny-kd-200ep/boxvision-rs-tiny-p2-int8.onnx", 320, (255, 0, 200)),
+    Variant("Teacher (small+P2 @ 416)",       "runs/rs-teacher-416-200ep/boxvision-rs-teacher.onnx",                    416, (0, 200, 0)),
+    Variant("Tiny KD (FP32 @ 320)",           "runs/rs-tiny-kd-200ep/boxvision-rs-tiny-p2.onnx",                        320, (255, 100, 0)),
+    Variant("Tiny KD (INT8 @ 320)",           "runs/rs-tiny-kd-200ep/boxvision-rs-tiny-p2-int8.onnx",                   320, (255, 0, 200)),
+    Variant("Tiny+ (FP32 @ 416 ms 300ep)",    "runs/rs-tiny-416-ms-300ep/boxvision-rs-tiny-416-ms-300ep.onnx",          416, (200, 200, 0)),
+    Variant("Small KD (FP32 @ 416 300ep)",    "runs/rs-small-kd-416-300ep/boxvision-rs-small-kd-416-300ep.onnx",        416, (0, 200, 200)),
 ]
 
 
@@ -73,6 +75,7 @@ def main():
     ap.add_argument("--n-images", type=int, default=6)
     ap.add_argument("--out", default="runs/rs-tiny-kd-200ep/gallery_compare")
     ap.add_argument("--conf", type=float, default=0.35)
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -80,7 +83,7 @@ def main():
     spec = load_dataset("road-signs")
     images = sorted(p for p in Path(spec.val.images).iterdir()
                     if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
-    picks = random.Random(42).sample(images, args.n_images)
+    picks = random.Random(args.seed).sample(images, args.n_images)
 
     sessions = {v.name: ort.InferenceSession(v.path, providers=["CPUExecutionProvider"])
                 for v in VARIANTS}

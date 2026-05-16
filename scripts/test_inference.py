@@ -36,11 +36,11 @@ class Variant:
 
 
 VARIANTS = [
-    Variant("Pro  (G FP32 @ 416)",       "runs/G-aug-300ep/boxvision-G.onnx",                       416, (0, 200, 0)),
-    Variant("Fast (G FP32 @ 320)",       "runs/G-aug-300ep/boxvision-G-320.onnx",                   320, (255, 100, 0)),
-    Variant("Tiny (KD FP32 @ 320)",      "runs/tiny-p2-light-200ep/boxvision-tiny-p2.onnx",         320, (255, 0, 200)),
-    Variant("TinyQ (KD INT8 @ 320)",     "runs/tiny-p2-light-200ep/boxvision-tiny-p2-int8.onnx",    320, (0, 200, 200)),
-    Variant("INT8 (G INT8 @ 320)",       "runs/G-aug-300ep/boxvision-G-320-int8.onnx",              320, (0, 100, 255)),
+    Variant("Pro  (G FP32 @ 416)",       "runs/G-aug-300ep/boxvision-G.onnx",                                       416, (0, 200, 0)),
+    Variant("Tiny+ (FP32 @ 416 ms)",     "runs/shapes-tiny-416-ms-300ep/boxvision-shapes-tiny-416-ms-300ep.onnx",   416, (255, 0, 200)),
+    Variant("Small KD (FP32 @ 416)",     "runs/shapes-small-kd-416-300ep/boxvision-shapes-small-kd-416-300ep.onnx", 416, (0, 200, 200)),
+    Variant("Fast (G FP32 @ 320)",       "runs/G-aug-300ep/boxvision-G-320.onnx",                                   320, (255, 100, 0)),
+    Variant("Tiny (KD FP32 @ 320)",      "runs/tiny-p2-light-200ep/boxvision-tiny-p2.onnx",                         320, (200, 100, 255)),
 ]
 
 
@@ -197,11 +197,11 @@ def main():
     print(f"{'Summary':<24} {'mAP@0.5':>10} {'avg ms':>10} {'vs YOLO26n':>12}")
     yolo_ms = 38.9
     map_lookup = {
-        "Pro  (G FP32 @ 416)":   87.30,
-        "Fast (G FP32 @ 320)":   86.48,
-        "Tiny (KD FP32 @ 320)":  74.48,
-        "TinyQ (KD INT8 @ 320)": 71.82,
-        "INT8 (G INT8 @ 320)":   79.05,
+        "Pro  (G FP32 @ 416)":      87.30,
+        "Tiny+ (FP32 @ 416 ms)":    86.37,
+        "Small KD (FP32 @ 416)":    78.02,
+        "Fast (G FP32 @ 320)":      86.48,
+        "Tiny (KD FP32 @ 320)":     74.48,
     }
     for v in VARIANTS:
         avg_ms = sum(per_variant_times[v.name]) / max(len(per_variant_times[v.name]), 1)

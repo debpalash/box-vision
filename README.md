@@ -3,25 +3,59 @@
 **Lightweight, CPU-optimized, class-agnostic bounding box detector.**  
 Purpose-built for workloads that only need to detect *where* objects are — no classification.
 
-## Three Shipping Tiers
+## Shipping Tiers
 
-Measured on shapes (567-image dataset, 141-image val), Mac M1 CPU, ONNX Runtime:
+The right tier depends on dataset character. We trained the same recipes
+on two datasets (shapes: small dense objects; road-signs: medium isolated
+signs) and the conclusion is **different per dataset**. Numbers are
+measured ONNX Runtime mAP@0.5 on Mac M1 CPU.
+
+### Shapes lineup (567 train / 141 val)
 
 | Tier | Backbone | params | input | mAP@0.5 | latency | use case |
 |---|---|---|---|---|---|---|
 | **Pro** | small + P2 | 500K | 416 | **87.30%** | 15.9ms | best accuracy |
-| **Fast** | small + P2 | 500K | 320 | 86.48% | 10.2ms | balanced |
-| **Tiny KD** | tiny + P2 (distilled) | **164K** | 320 | 74.48% | **5.8ms** | edge/IoT speed |
-| **Tiny KD INT8** | tiny + P2 (distilled, PTQ) | 164K | 320 | 71.82% | **4.7ms** | smallest deploy |
+| **Tiny+** ★ | tiny + P2 (KD, multi-scale, 300ep) | **164K** | **416** | **86.37%** | **8.5ms** | **best speed/accuracy** |
+| Fast | small + P2 | 500K | 320 | 86.48% | 10.2ms | balanced |
+| Small KD | small + P2 (KD, 300ep) | 842K | 416 | 78.02% | 17.5ms | (not recommended — noisier than Tiny+) |
+| Tiny KD | tiny + P2 (KD) | 164K | 320 | 74.48% | 5.8ms | smallest @ 320 |
+| Tiny KD INT8 | tiny + P2 (KD, PTQ) | 164K | 320 | 71.82% | 4.7ms | smallest deploy |
 
-The Tiny tier is the output of offline knowledge distillation: a `small+P2`
-teacher labels the training set, and the student trains on real GT + teacher
-pseudo-labels (~+48% extra training signal). The recipe gives Tiny **86% of
-the teacher's mAP at 33% of the parameters and 1.8× the speed**.
+**On shapes, the sweet spot is Tiny+**: only 0.93 mAP below Pro at 1/3 the
+params and 2× the speed. The 416 input + multi-scale training recipe
+unlocked +11.9 mAP over the 320 baseline.
 
-> Tier names map to shipping ONNX files: `boxvision-G.onnx` (Pro),
-> `boxvision-G-320.onnx` (Fast), `boxvision-tiny-p2.onnx` (Tiny),
-> `boxvision-tiny-p2-int8.onnx` (Tiny INT8).
+### Road-signs lineup (1376 train / 488 val)
+
+| Tier | Backbone | params | input | mAP@0.5 | latency | use case |
+|---|---|---|---|---|---|---|
+| **Tiny KD** ★ | tiny + P2 (KD) | **164K** | **320** | **79.07%** | **4.1ms** | **best on this dataset** |
+| Tiny KD INT8 | tiny + P2 (KD, PTQ) | 164K | 320 | 77.98% | 4.2ms | smallest deploy |
+| Teacher | small + P2 (heavy aug) | 842K | 416 | 56.22% | — | underconfident at conf≥0.35 |
+| Tiny+ (experimental) | tiny + P2 (KD, ms, 300ep) | 164K | 416 | 56.02% | 8.3ms | **regression — do not ship** |
+| Small KD (experimental) | small + P2 (KD, 300ep) | 842K | 416 | 55.76% | 18.2ms | **regression — do not ship** |
+
+**On road-signs, the shapes recipe regresses**: the 416+multi-scale upgrade
+that lifted shapes by +12 mAP costs −23 mAP on road-signs. Likely cause:
+the 4-way parallel pipeline used batch_size=32 without LR rescaling, and
+road-signs is more sensitive to that than shapes. Until that's re-tested,
+ship the **original Tiny KD @ 320** for road-signs.
+
+### Visual scoring (20 panels, 10 per dataset)
+
+We hand-scored a fresh 10-image sample from each val set:
+
+- **Shapes**: Pro > Tiny+ > Fast >> Small KD > Tiny KD@320. Tiny+ matches
+  Pro on most images, slightly noisier on the hardest (overlapping shapes
+  + decorative spirals).
+- **Road-signs**: Tiny KD@320 hits 9/10 visible signs vs. 7/10 for the
+  experimental 416 variants and 5/10 for the teacher (the teacher's
+  confidence calibration drops boxes below the conf=0.35 UI threshold).
+
+> Shipping ONNX files (on disk):
+> `boxvision-G.onnx` (Pro), `boxvision-G-320.onnx` (Fast),
+> `boxvision-shapes-tiny-416-ms-300ep.onnx` (Tiny+ for shapes),
+> `boxvision-tiny-p2.onnx` / `boxvision-rs-tiny-p2.onnx` (Tiny KD).
 
 ## Architecture
 
