@@ -99,6 +99,36 @@ road-signs-distilled:
       images: valid
       annotations: valid/_annotations.coco.json
 
+road-signs-2k:
+  format: coco
+  root: datasets/road-signs-2k
+  class_agnostic: true
+  description: road-signs train+val+test merged into one pool (2093 imgs), random 90/10 train/val split with seed=42 — larger training signal for KD experiments
+  license: CC BY 4.0
+  source: scripts/build_road_signs_2k.py from datasets/coco/{train,valid,test}
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
+road-signs-2k-distilled:
+  format: coco
+  root: datasets/road-signs-2k-distilled
+  class_agnostic: true
+  description: road-signs-2k train split augmented with rs-teacher-2k pseudo-labels; valid mirrors road-signs-2k valid (209 imgs)
+  license: CC BY 4.0
+  source: distill_pseudo_labels.py on road-signs-2k
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 road-signs-yolo:
   format: yolo
   root: datasets/yolo26
