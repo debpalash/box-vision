@@ -76,7 +76,7 @@ def small_config(**overrides) -> ModelConfig:
     defaults = dict(
         backbone="shufflenet_v2_x1_0",
         fpn_out_channels=48,
-        fpn_use_ghost=True,
+        fpn_use_ghost=False,
         head_num_convs=2,
     )
     defaults.update(overrides)
