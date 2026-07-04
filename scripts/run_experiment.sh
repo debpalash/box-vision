@@ -43,6 +43,13 @@ $PY -m boxvision.cli train \
 TRAIN_MIN=$(awk '$1 == "TRAIN_MINUTES:" {print $2}' "$RUN_DIR/train.log" | tail -n 1)
 TRAIN_MIN=${TRAIN_MIN:-0.0}
 
+# 2-way regime: trainings may overlap, but the measurement tail must run on a
+# quiet machine — serialize export/eval/bench across all slots via a global lock.
+exec 9>/tmp/boxvision-bench.lock
+echo "waiting for bench lock..."
+flock 9
+echo "bench lock acquired"
+
 echo "=== [2/4] export ==="
 CKPT=$RUN_DIR/best.pt
 if [ ! -f "$CKPT" ]; then
