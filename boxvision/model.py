@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 
 from .backbone import ShuffleNetV2Backbone
 from .fpn import LightFPN
-from .head import FCOSHead
+from .head import FCOSHead, AuxHead
 from .config import ModelConfig
 
 
@@ -55,6 +55,16 @@ class BoxVision(nn.Module):
             num_classes=self.config.num_classes,
         )
 
+        # Training-only auxiliary head for AGM (NanoDet-Plus). getattr guards
+        # against old pickled ModelConfig instances that predate the field.
+        self.aux_head = None
+        if getattr(self.config, "use_aux_agm", False):
+            self.aux_head = AuxHead(
+                in_channels=self.config.fpn_out_channels,
+                num_levels=len(self.config.strides),
+                num_classes=self.config.num_classes,
+            )
+
         self.strides = self.config.strides
         self._grids_built = False
         self._grids_for_hw: Tuple[int, int] = (-1, -1)
@@ -83,11 +93,18 @@ class BoxVision(nn.Module):
             class_logits: list[Tensor] or None — only when num_classes > 1
             centerness:   list[Tensor] or None — only when use_centerness=True
 
+        AGM exception: with use_aux_agm=True and in train mode, a 5th element
+        is appended — the aux head's own (objectness, bbox_reg, class_logits,
+        centerness) tuple. Eval/export always return the plain 4-tuple.
+
         Use `predict()` for PyTorch inference with decode + NMS post-processing.
         """
         features = self.backbone(x)
         fpn_features = self.fpn(features)
-        return self.head(fpn_features)
+        outputs = self.head(fpn_features)
+        if self.aux_head is not None and self.training:
+            return (*outputs, self.aux_head(fpn_features))
+        return outputs
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor):

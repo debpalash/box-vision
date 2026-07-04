@@ -152,6 +152,88 @@ class FCOSHead(nn.Module):
         return all_objectness, all_bbox_reg, class_logits_out, centerness_out
 
 
+class AuxHead(nn.Module):
+    """
+    Training-only auxiliary head for AGM (Assign Guidance Module, NanoDet-Plus).
+
+    A stronger head — 4x standard 3x3 Conv+GN+ReLU tower at FPN width — whose
+    predictions drive the TAL label assignment during training (replacing the
+    light head's noisy early predictions). One module shared across all FPN
+    levels, applied per level. Never part of the inference/export graph.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 48,
+        num_convs: int = 4,
+        num_levels: int = 3,
+        num_classes: int = 1,
+    ):
+        super().__init__()
+        self.multi_class = num_classes > 1
+
+        # GroupNorm groups must divide the channel count (48 % 32 != 0), so
+        # halve from 32 until it does; small widths use one group per channel.
+        num_groups = in_channels if in_channels < 32 else 32
+        while in_channels % num_groups != 0:
+            num_groups //= 2
+
+        tower = []
+        for _ in range(num_convs):
+            tower.append(nn.Conv2d(in_channels, in_channels, kernel_size=3,
+                                   padding=1, bias=False))
+            tower.append(nn.GroupNorm(num_groups, in_channels))
+            tower.append(nn.ReLU(inplace=True))
+        self.tower = nn.Sequential(*tower)
+
+        self.obj_pred = nn.Conv2d(in_channels, 1, kernel_size=3, padding=1)
+        self.bbox_pred = nn.Conv2d(in_channels, 4, kernel_size=3, padding=1)
+        if self.multi_class:
+            self.class_pred = nn.Conv2d(in_channels, num_classes, kernel_size=3, padding=1)
+
+        # Per-level learnable scale for bbox regression (matches FCOSHead)
+        self.scales = nn.ModuleList([ScaleLayer(1.0) for _ in range(num_levels)])
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.tower.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, std=0.01)
+
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        nn.init.normal_(self.obj_pred.weight, std=0.01)
+        nn.init.constant_(self.obj_pred.bias, bias_value)
+
+        nn.init.normal_(self.bbox_pred.weight, std=0.01)
+        nn.init.zeros_(self.bbox_pred.bias)
+
+        if self.multi_class:
+            nn.init.normal_(self.class_pred.weight, std=0.01)
+            nn.init.constant_(self.class_pred.bias, bias_value)
+
+    def forward(self, features: List[torch.Tensor]):
+        """Same output contract as FCOSHead (centerness always None)."""
+        all_objectness = []
+        all_bbox_reg = []
+        all_class_logits: List[torch.Tensor] = []
+
+        for level_idx, feat in enumerate(features):
+            x = self.tower(feat)
+            all_objectness.append(self.obj_pred(x))
+            if self.multi_class:
+                all_class_logits.append(self.class_pred(x))
+
+            bbox_reg = self.scales[level_idx](self.bbox_pred(x))
+            bbox_reg = torch.clamp(bbox_reg, max=4.0)  # match FCOSHead decode
+            bbox_reg = torch.exp(bbox_reg)
+            all_bbox_reg.append(bbox_reg)
+
+        class_logits_out = all_class_logits if self.multi_class else None
+        return all_objectness, all_bbox_reg, class_logits_out, None
+
+
 class _StandardConvBlock(nn.Module):
     """Standard Conv + BN + SiLU block."""
 

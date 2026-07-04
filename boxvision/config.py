@@ -57,6 +57,13 @@ class ModelConfig:
     # --- Centerness ---
     use_centerness: bool = False
 
+    # --- Aux head (AGM) ---
+    # NanoDet-Plus Assign Guidance Module: a stronger training-only auxiliary
+    # head runs on the FPN features and its predictions drive the TAL label
+    # assignment for the light head. Detached at eval/export — zero inference
+    # cost, only checkpoint size grows.
+    use_aux_agm: bool = False
+
 
 # Presets
 def tiny_config(**overrides) -> ModelConfig:
@@ -78,6 +85,7 @@ def small_config(**overrides) -> ModelConfig:
         fpn_out_channels=48,
         fpn_use_ghost=False,
         head_num_convs=2,
+        use_aux_agm=True,  # exp/agm: aux-head-guided TAL assignment
     )
     defaults.update(overrides)
     return ModelConfig(**defaults)
@@ -122,6 +130,9 @@ class TrainConfig:
     # --- Focal loss params ---
     focal_alpha: float = 0.75
     focal_gamma: float = 2.0
+
+    # --- Aux head (AGM) ---
+    aux_loss_weight: float = 1.0
 
     # --- TAL assigner params ---
     # Stays at 10. Lowering to 5 hurt strict-IoU mAP on small datasets

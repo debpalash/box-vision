@@ -123,6 +123,7 @@ class Trainer:
             tal_alpha=self.train_config.tal_alpha,
             tal_beta=self.train_config.tal_beta,
             use_soft_labels=self.train_config.tal_use_soft_labels,
+            aux_loss_weight=getattr(self.train_config, "aux_loss_weight", 1.0),
         )
 
         # Optimizer
@@ -219,10 +220,14 @@ class Trainer:
 
             use_amp = self.train_config.amp and self.device.type == "cuda"
             with autocast(enabled=use_amp):
-                objectness, bbox_reg, class_logits, centerness = self.model(images)
+                outputs = self.model(images)
+                # AGM: train-mode forward appends aux head outputs as a 5th element
+                aux_outputs = outputs[4] if len(outputs) == 5 else None
+                objectness, bbox_reg, class_logits, centerness = outputs[:4]
                 losses = self.criterion(
                     objectness, bbox_reg, class_logits, centerness,
                     gt_boxes, batch.get("labels"),
+                    aux_preds=aux_outputs,
                 )
 
             self.scaler.scale(losses["total_loss"]).backward()
@@ -249,6 +254,8 @@ class Trainer:
             }
             if self.model_config.num_classes > 1:
                 postfix["cls"] = f"{losses['class_loss'].item():.4f}"
+            if aux_outputs is not None:
+                postfix["aux"] = f"{losses['aux_loss'].item():.4f}"
             postfix["pos"] = losses["num_positives"]
             postfix["lr"] = f"{current_lr:.6f}"
             pbar.set_postfix(postfix)
