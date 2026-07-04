@@ -140,7 +140,7 @@ class TrainConfig:
     multiscale: bool = False
     multiscale_sizes: List[int] = field(default_factory=lambda: [320, 416, 512])
     mixup: bool = False
-    copy_paste: bool = False
+    copy_paste: bool = True
 
     # --- EMA ---
     # Tuned for small datasets (1-2K images): 0.999 takes ~5K steps to converge,
