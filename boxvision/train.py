@@ -199,7 +199,13 @@ class Trainer:
     def train_one_epoch(self, epoch: int) -> dict:
         """Train for one epoch."""
         self.model.train()
-        self.scheduler.step(epoch)
+        sched = getattr(self, "_budget_sched", None)
+        if sched:
+            b_t0, b_s = sched
+            epoch_key = min(99, int((time.time() - b_t0) / b_s * 100))
+        else:
+            epoch_key = epoch
+        self.scheduler.step(epoch_key)
 
         total_loss = 0.0
         total_obj_loss = 0.0
@@ -359,6 +365,17 @@ class Trainer:
         import random as _random
         t0 = time.time()
         budget_s = self.train_config.max_minutes * 60
+        if budget_s:
+            # Budget mode trains a sliver of `epochs`, so the epoch-keyed cosine
+            # never leaves max LR. Re-key the schedule to wall-clock: 100 virtual
+            # epochs spanning the budget, so LR actually anneals to zero by stop.
+            self.scheduler = CosineWarmupScheduler(
+                self.optimizer,
+                warmup_epochs=self.train_config.warmup_epochs,
+                total_epochs=100,
+                warmup_lr_ratio=self.train_config.warmup_lr_ratio,
+            )
+            self._budget_sched = (t0, budget_s)
         for epoch in range(self.start_epoch, self.train_config.epochs):
             if budget_s and time.time() - t0 >= budget_s:
                 print(f"\nTime budget reached ({self.train_config.max_minutes:.1f} min) "
