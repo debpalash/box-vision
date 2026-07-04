@@ -162,6 +162,21 @@ hcap:
       images: valid
       annotations: valid/_annotations.coco.json
 
+hcap-distilled:
+  format: coco
+  root: datasets/hcap-distilled
+  class_agnostic: true
+  description: hcap train split augmented with YOLO26n teacher pseudo-labels (yolo26n_hcap_ref @ imgsz=320, conf=0.40, iou-with-gt=0.5; 8627->8652 boxes, +0.3% — hcap labels are near-complete); valid mirrors hcap valid for apples-to-apples eval
+  license: (user-provided)
+  source: /home/ubuntu/yolo-ref/make_teacher_labels.py from runs/yolo26n_hcap_ref/weights/best.pt (98.78 mAP50 / 87.08 mAP5095 teacher)
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 # Future entries — add as datasets are prepared:
 #
 # coco-collapsed:
