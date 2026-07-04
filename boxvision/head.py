@@ -153,7 +153,7 @@ class FCOSHead(nn.Module):
 
 
 class _StandardConvBlock(nn.Module):
-    """Standard Conv + BN + SiLU block."""
+    """Standard Conv + BN + ReLU block."""
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3,
                  stride: int = 1, padding: int = 1, bias: bool = False):
@@ -161,7 +161,7 @@ class _StandardConvBlock(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
                               stride=stride, padding=padding, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.bn(self.conv(x)))

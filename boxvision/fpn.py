@@ -30,7 +30,7 @@ class DepthwiseSeparableConv(nn.Module):
             in_channels, out_channels, kernel_size=1, bias=bias
         )
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.depthwise(x)
@@ -64,7 +64,7 @@ class GhostModule(nn.Module):
             nn.Conv2d(in_channels, intrinsic_channels, kernel_size,
                       stride=stride, padding=kernel_size // 2, bias=False),
             nn.BatchNorm2d(intrinsic_channels),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
         # Cheap operation (generates ghost features from intrinsic)
@@ -73,7 +73,7 @@ class GhostModule(nn.Module):
                       stride=1, padding=dw_kernel // 2,
                       groups=intrinsic_channels, bias=False),
             nn.BatchNorm2d(ghost_channels),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
