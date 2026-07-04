@@ -94,6 +94,10 @@ class TrainConfig:
 
     # --- Training ---
     epochs: int = 100
+    # Wall-clock training budget in minutes; 0 disables. When set, the epoch
+    # loop stops at the deadline (autoresearch fixed-budget contract) after a
+    # final validation + checkpoint save.
+    max_minutes: float = 0.0
     batch_size: int = 64
     num_workers: int = 4
     learning_rate: float = 0.01

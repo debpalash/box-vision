@@ -346,7 +346,19 @@ class Trainer:
         effective_off = min(self.train_config.mosaic_off_epochs, self.train_config.epochs // 2)
 
         import random as _random
+        t0 = time.time()
+        budget_s = self.train_config.max_minutes * 60
         for epoch in range(self.start_epoch, self.train_config.epochs):
+            if budget_s and time.time() - t0 >= budget_s:
+                print(f"\nTime budget reached ({self.train_config.max_minutes:.1f} min) "
+                      f"— stopping before epoch {epoch + 1}.")
+                print(f"\n  Final validation:")
+                val_metrics = self.validate()
+                is_best = val_metrics.get("mAP50", 0) > self.best_metric
+                if is_best:
+                    self.best_metric = val_metrics["mAP50"]
+                self.save_checkpoint(max(epoch - 1, 0), val_metrics, is_best=is_best)
+                break
             # Mosaic scheduling: disable for last N epochs
             if self.train_config.mosaic:
                 remaining = self.train_config.epochs - epoch
@@ -400,3 +412,4 @@ class Trainer:
 
         print(f"\nTraining complete! Best mAP@0.5: {self.best_metric:.4f}")
         print(f"Best model: {os.path.join(self.train_config.save_dir, 'best.pt')}")
+        print(f"TRAIN_MINUTES: {(time.time() - t0) / 60:.2f}")

@@ -38,6 +38,7 @@ def cmd_train(args):
     train_config = TrainConfig(
         dataset=args.dataset,
         epochs=args.epochs,
+        max_minutes=args.max_minutes,
         batch_size=args.batch_size,
         learning_rate=args.lr,
         num_workers=args.workers,
@@ -201,6 +202,8 @@ def main():
     train_parser.add_argument("--dataset", type=str, default="road-signs",
                               help="Dataset name from datasets.yaml (run `boxvision datasets` to list)")
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
+    train_parser.add_argument("--max-minutes", type=float, default=0.0,
+                              help="Wall-clock training budget in minutes (0 = no budget)")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     train_parser.add_argument("--input-size", type=int, default=320, help="Input image size")
