@@ -177,6 +177,21 @@ hcap-distilled:
       images: valid
       annotations: valid/_annotations.coco.json
 
+hcap-refined:
+  format: coco
+  root: datasets/hcap-refined
+  class_agnostic: true
+  description: hcap train with YOLO26n teacher box GEOMETRY replacing matched GT (conf=0.25, match IoU>=0.5; 8620/8627 GT refined 99.9%, 7 kept original, 25 novel teacher boxes added at conf>=0.40; mean refined IoU vs original GT 0.941) — targets the mAP5095 localization gap; valid mirrors hcap valid for apples-to-apples eval
+  license: (user-provided)
+  source: /home/ubuntu/yolo-ref/make_teacher_labels.py --mode refine from runs/yolo26n_hcap_ref/weights/best.pt (98.78 mAP50 / 87.08 mAP5095 teacher)
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 # Future entries — add as datasets are prepared:
 #
 # coco-collapsed:
