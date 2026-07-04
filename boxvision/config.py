@@ -116,7 +116,7 @@ class TrainConfig:
 
     # --- Loss weights ---
     loss_objectness_weight: float = 4.0
-    loss_bbox_weight: float = 4.0
+    loss_bbox_weight: float = 6.0
     loss_class_weight: float = 1.0  # Multi-class only
 
     # --- Focal loss params ---
