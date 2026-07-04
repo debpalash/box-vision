@@ -19,8 +19,8 @@ import math
 class DepthwiseSeparableConv(nn.Module):
     """Depthwise separable convolution: depthwise + pointwise."""
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3,
-                 stride: int = 1, padding: int = 1, bias: bool = False):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 5,
+                 stride: int = 1, padding: int = 2, bias: bool = False):
         super().__init__()
         self.depthwise = nn.Conv2d(
             in_channels, in_channels, kernel_size=kernel_size,
