@@ -147,6 +147,21 @@ road-signs-yolo:
       images: test/images
       labels: test/labels
 
+hcap:
+  format: coco
+  root: datasets/hcap
+  class_agnostic: true
+  description: hcap box detection — Label Studio projects 11+541 merged (1538 imgs after content-hash dedupe), 85/15 train/val seed=42 stratified by source project, single native "box" class
+  license: (user-provided)
+  source: scripts/build_hcap.py from ../datasets/hcap/*.zip
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 # Future entries — add as datasets are prepared:
 #
 # coco-collapsed:
