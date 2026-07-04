@@ -94,6 +94,11 @@ class TrainConfig:
 
     # --- Training ---
     epochs: int = 100
+    # Fixed seed for weight init, shuffling, and augmentation sampling. The
+    # autoresearch series runs every experiment at the same seed so metric
+    # deltas reflect the code change, not sampling variance (unseeded
+    # identical-code runs differed by 1.88 mAP50). -1 disables seeding.
+    seed: int = 42
     # Wall-clock training budget in minutes; 0 disables. When set, the epoch
     # loop stops at the deadline (autoresearch fixed-budget contract) after a
     # final validation + checkpoint save.

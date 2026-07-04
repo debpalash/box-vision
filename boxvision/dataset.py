@@ -437,6 +437,15 @@ def collate_fn(batch: List[dict]) -> dict:
     }
 
 
+def _worker_init_fn(worker_id: int):
+    """Seed python/numpy RNGs per dataloader worker (torch already seeds its own
+    per-worker generator); mosaic/mixup sampling uses `random`, so without this
+    workers stay unseeded even when training is."""
+    base = torch.initial_seed() % 2**31
+    random.seed(base + worker_id)
+    np.random.seed((base + worker_id) % 2**32)
+
+
 def build_dataloader(
     image_dir: str,
     annotation_file: str,
@@ -471,4 +480,5 @@ def build_dataloader(
         collate_fn=collate_fn,
         pin_memory=True,
         drop_last=is_training,
+        worker_init_fn=_worker_init_fn,
     )

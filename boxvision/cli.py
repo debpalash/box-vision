@@ -39,6 +39,7 @@ def cmd_train(args):
         dataset=args.dataset,
         epochs=args.epochs,
         max_minutes=args.max_minutes,
+        seed=args.seed,
         batch_size=args.batch_size,
         learning_rate=args.lr,
         num_workers=args.workers,
@@ -204,6 +205,8 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--max-minutes", type=float, default=0.0,
                               help="Wall-clock training budget in minutes (0 = no budget)")
+    train_parser.add_argument("--seed", type=int, default=42,
+                              help="RNG seed for init/shuffle/augment (-1 = unseeded)")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=0.01, help="Learning rate")
     train_parser.add_argument("--input-size", type=int, default=320, help="Input image size")

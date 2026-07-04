@@ -60,6 +60,17 @@ class Trainer:
         self.model_config = model_config or ModelConfig()
         self.train_config = train_config or TrainConfig()
 
+        # Seed before anything stochastic — model weight init happens in this
+        # constructor, dataloader shuffling later via the global generator.
+        seed = getattr(self.train_config, "seed", -1)
+        if seed is not None and seed >= 0:
+            import random as _r
+            import numpy as _np
+            _r.seed(seed)
+            _np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+
         # Reconcile num_classes with the chosen dataset. The dataset spec is the
         # source of truth: class_agnostic=True ⇒ num_classes=1; otherwise build a
         # peek dataset to count actual referenced categories.
