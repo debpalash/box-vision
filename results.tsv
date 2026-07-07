@@ -1,0 +1,23 @@
+commit	mAP50	mAP5095	latency_ms	throughput_ips	params_k	status	description
+a3f9038	96.70	56.98	6.42	1091.2	830.3	superseded	baseline unseeded slot-a (pre-seed harness v1)
+a3f9038	94.82	50.81	6.39	1086.4	830.3	noise-ref	baseline unseeded slot-b identical code
+bab0955	93.55	42.11	6.41	1091.7	830.3	superseded	baseline-s42 slot-a seed42 (champion #1, harness v1)
+bab0955	90.89	43.14	6.41	1097.5	830.3	noise-ref	baseline-s42-rep slot-b same seed
+626f823	89.19	40.13	6.07	1132.2	853.4	discard	relu-swap: acc guard fail; speed confounded by onnxsim drift; RESURRECTION QUEUED (audit F11a)
+bab0955	93.55	42.11	6.17	1155.6	853.4	rebench	champion re-bench under harness v2 (onnxsim); params_k drift +23.1k = materialized constants (audit F2)
+0106a7f	94.57	45.88	6.09	1172.2	853.3	keep	ghost-off simplicity win (champion #2; complexity delta unmeasured -0.1k params, audit F3)
+bab0955	88.01	33.95	6.44	1089.9	854.6	discard	tail-only INT8 PTQ per-tensor on champion ckpt: slower and -5.5 mAP
+40ad446	86.00	30.26	6.07	1173.2	853.3	discard	time-cosine: LR anneal freezes underfit model
+5a70576	89.57	37.11	6.20	1141.8	858.7	discard	dw5 kernels: -5 mAP +1.8% lat
+e66c627	93.58	53.09	6.12	1179.1	853.3	revoked	bbox-w4: champion-elect on n=1 mAP5095, NOT reproduced (audit F5/F6 corrected)
+3ef7912	94.73	47.25	6.06	1172.9	853.3	discard	copy-paste: all within noise
+e66c627	94.20	46.12	6.05	1176.2	853.3	discard	bbox-w4-rep: replication failed (spread 7pts)
+1d7c374	95.78	54.72	6.09	1165.4	853.3	n1-signal	bbox-w6 first draw (single run, not gated per protocol)
+1d7c374	91.91	49.69	6.09	1179.3	853.3	keep	bbox-w6-r1 (replication pair)
+1d7c374	95.66	57.01	6.08	1181.4	853.3	keep	bbox-w6-r2 CHAMPION #3 pair-mean mAP50 93.79 mAP5095 53.35 (champion ref = pair mean, audit F8)
+359aeaa	87.16	35.44	6.06	1176.0	853.3	discard	agm-r1 replicated pair
+359aeaa	88.41	41.15	6.07	1168.2	853.3	discard	agm-r2: pair-mean 87.79/38.30 far below champion; immature aux head poisons assignment in budget regime
+1d7c374	97.69	60.34	6.06	1171.5	853.3	consolidation	consolidation-w6: champion recipe 300ep full train, +3.9 mAP50 +7.0 mAP5095 over pair-mean, speed unchanged — A1 PASS
+yolo26n	98.78	87.08	9.00	732.3	2385.6	reference	YOLO26n fine-tuned 300ep on hcap: the mission yardstick (NMS in-graph footnote)
+44cbd5f	97.32	65.94	6.29	1152.2	853.3	campaign	kd-student pseudo-labels 300ep: +5.6 mAP5095 vs consolidation but only +25 boxes differ - trajectory variance not ruled out (full-schedule sigma unknown); bench contaminated by concurrent train
+e9f5976	98.50	69.86	6.08	1145.6	853.3	campaign	kd-refined BEST MODEL: teacher geometry transfer +9.5 mAP5095 vs consolidation; dose-response ordering confirms mechanism; mAP50 ties teacher at 1.5x its speed
