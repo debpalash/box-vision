@@ -192,6 +192,21 @@ hcap-refined:
       images: valid
       annotations: valid/_annotations.coco.json
 
+id11:
+  format: coco
+  root: datasets/id11
+  class_agnostic: true
+  description: Label Studio project-11 solo export (2026-07-07, 987 imgs after content-hash dedupe), 85/15 train/val seed=42, single native "box" class
+  license: (user-provided)
+  source: scripts/build_hcap.py from ../datasets/project-11-at-2026-07-07-08-36-20c61b4a.zip
+  splits:
+    train:
+      images: train
+      annotations: train/_annotations.coco.json
+    val:
+      images: valid
+      annotations: valid/_annotations.coco.json
+
 # Future entries — add as datasets are prepared:
 #
 # coco-collapsed:
