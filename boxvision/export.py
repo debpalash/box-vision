@@ -17,6 +17,27 @@ from .model import BoxVision, build_model
 from .config import ModelConfig, ExportConfig
 
 
+def _nms_numpy(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> np.ndarray:
+    """Class-agnostic greedy NMS. Returns indices of boxes to keep."""
+    if len(boxes) == 0:
+        return np.empty(0, dtype=np.int64)
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        inter = np.maximum(0.0, xx2 - xx1) * np.maximum(0.0, yy2 - yy1)
+        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-9)
+        order = order[1:][iou <= iou_threshold]
+    return np.array(keep, dtype=np.int64)
+
+
 class BoxVisionONNXExporter:
     """Export BoxVision model to ONNX format."""
 
@@ -276,6 +297,11 @@ class BoxVisionONNXInference:
 
         # Rescale to original image size
         boxes /= meta["scale"]
+
+        # Class-agnostic NMS to collapse overlapping duplicate boxes
+        keep = _nms_numpy(boxes, scores, self.nms_threshold)
+        boxes = boxes[keep]
+        scores = scores[keep]
 
         # Clip to image bounds
         boxes[:, 0] = np.clip(boxes[:, 0], 0, meta["orig_w"])
